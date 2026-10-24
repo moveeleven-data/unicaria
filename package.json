@@ -1,0 +1,42 @@
+{
+  "name": "unicaria",
+  "version": "0.2.0",
+  "private": true,
+  "description": "A local notation workspace with vertical harmonic audition",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "notices": "node scripts/notices.mjs",
+    "format": "prettier --write src tests electron scripts package.json tsconfig.json vite.config.ts index.html",
+    "format:check": "prettier --check src tests electron scripts package.json tsconfig.json vite.config.ts index.html",
+    "start": "electron .",
+    "package": "node scripts/package.mjs"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "spessasynth_core": "4.3.22",
+    "vexflow": "5.0.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "@testing-library/dom": "10.4.2",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vexflow-fonts/academico": "1.0.1",
+    "@vexflow-fonts/bravura": "1.0.2",
+    "@vitejs/plugin-react": "6.1.2",
+    "electron": "45.0.0",
+    "jsdom": "30.1.3",
+    "midi-file": "1.2.4",
+    "prettier": "3.9.10",
+    "typescript": "5.9.3",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}

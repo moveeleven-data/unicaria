@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.sf2 binary
+# Preserve the generated collection of third-party license texts verbatim.
+public/THIRD-PARTY-NOTICES.txt whitespace=-blank-at-eof
