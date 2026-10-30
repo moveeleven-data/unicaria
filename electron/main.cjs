@@ -62,9 +62,9 @@ app.whenReady().then(async () => {
   window = new BrowserWindow({
     width: 1540,
     height: 1000,
-    minWidth: 1050,
-    minHeight: 720,
-    backgroundColor: "#eef1ec",
+    minWidth: 640,
+    minHeight: 480,
+    backgroundColor: "#172a37",
     title: "Unicaria",
     autoHideMenuBar: true,
     show: false,

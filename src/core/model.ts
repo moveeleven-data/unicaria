@@ -158,6 +158,25 @@ export function keyAlter(step: Step, signature: string): number {
   const order = count > 0 ? "FCGDAEB" : "BEADGCF";
   return order.slice(0, Math.abs(count)).includes(step) ? Math.sign(count) : 0;
 }
+export function transposeKey(key: string, transpose: number) {
+  if (!transpose) return key;
+  const tonic = (name: string) =>
+    midiPitch({
+      step: name[0] as Step,
+      alter: name.includes("#") ? 1 : name.includes("b") ? -1 : 0,
+      octave: 4,
+    }) % 12;
+  const target = (((tonic(key) + transpose) % 12) + 12) % 12;
+  return (
+    [...keySignatures]
+      .filter((k) => tonic(k) === target)
+      .sort(
+        (a, b) =>
+          Math.abs(keySignatures.indexOf(a) - 7) -
+          Math.abs(keySignatures.indexOf(b) - 7),
+      )[0] ?? key
+  );
+}
 export function measureStarts(score: Score): Map<string, Rational> {
   const starts = new Map<string, Rational>();
   let t = ZERO;

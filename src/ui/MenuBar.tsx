@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 type Item = [string, string, string?];
 const menus: Record<string, Item[]> = {
   File: [
@@ -114,6 +114,33 @@ export function MenuBar({
 }) {
   const [open, setOpen] = useState<string>(),
     root = useRef<HTMLElement>(null);
+  const [popup, setPopup] = useState({ left: 8, top: 34, maxHeight: 500 });
+  useLayoutEffect(() => {
+    if (!open) return;
+    const position = () => {
+      const button = root.current?.querySelector(`[data-menu="${open}"]`);
+      const bounds = button?.getBoundingClientRect();
+      if (!bounds) return;
+      const top = Math.min(
+        bounds.bottom + 4,
+        Math.max(8, window.innerHeight - 120),
+      );
+      setPopup({
+        left: Math.max(
+          8,
+          Math.min(
+            bounds.left,
+            window.innerWidth - Math.min(280, window.innerWidth - 16) - 8,
+          ),
+        ),
+        top,
+        maxHeight: window.innerHeight - top - 12,
+      });
+    };
+    position();
+    window.addEventListener("resize", position);
+    return () => window.removeEventListener("resize", position);
+  }, [open]);
   const entries = Object.entries(menus);
   if (mode === "speedy" || mode === "write")
     entries.splice(7, 0, [
@@ -225,7 +252,12 @@ export function MenuBar({
             {name}
           </button>
           {open === name && (
-            <div className="menu-popup" role="menu" aria-label={name}>
+            <div
+              className="menu-popup"
+              style={popup}
+              role="menu"
+              aria-label={name}
+            >
               {items.map(([action, label, shortcut]) =>
                 action.startsWith("-") ? (
                   <div key={action} role="separator" />

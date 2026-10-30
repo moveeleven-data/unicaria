@@ -13,7 +13,11 @@ export function KeyboardGuide({
         aria-label="Keyboard guide"
         onPointerDown={(e) => e.stopPropagation()}
       >
-        <button className="modal-close" onClick={() => setHelp(false)}>
+        <button
+          className="modal-close"
+          aria-label="Close keyboard guide"
+          onClick={() => setHelp(false)}
+        >
           ×
         </button>
         <h2>Working in Unicaria</h2>
@@ -21,6 +25,15 @@ export function KeyboardGuide({
           Click a measure to select it. Shift-click extends the selection; drag
           selects part of a measure. Double-click expands to complete measures,
           then all staves. Right-click for editing commands.
+        </p>
+        <p>
+          To write with the mouse, choose a note on the left and move onto the
+          staff. The colored preview shows its pitch and position; click to
+          place it. You can also drag a duration from the palette onto the
+          staff. Click above or below a note to build a chord, or drag its
+          notehead vertically to change that pitch. Ctrl-click selects a note
+          for Delete; the eraser removes just the chord tone you click. Escape
+          cancels a drag and closes an open panel.
         </p>
         <div className="help-grid">
           {[

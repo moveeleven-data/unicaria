@@ -19,6 +19,7 @@ interface Props {
   newProgram: number;
   setNewProgram: Dispatch<SetStateAction<number>>;
   addInstrument: () => void;
+  close: () => void;
 }
 export function InstrumentPanel({
   score,
@@ -31,11 +32,22 @@ export function InstrumentPanel({
   newProgram,
   setNewProgram,
   addInstrument,
+  close,
 }: Props) {
   return (
-    <aside className="instruments">
-      <div className="section-title">
-        INSTRUMENTS <span>{score.instruments.length}</span>
+    <aside className="instruments" aria-label="Instruments panel">
+      <div className="panel-heading">
+        <h2>
+          Instruments <span>{score.instruments.length}</span>
+        </h2>
+        <button
+          className="panel-close"
+          aria-label="Close instruments"
+          title="Close instruments (Esc)"
+          onClick={close}
+        >
+          ×
+        </button>
       </div>
       {score.instruments.map((inst, ii) => (
         <div

@@ -4,6 +4,13 @@ import { InstrumentPanel } from "./InstrumentPanel";
 import { MenuBar } from "./MenuBar";
 import { MainPalette } from "./MainPalette";
 import { EntryPalette } from "./EntryPalette";
+import { EntryPreview } from "./EntryPreview";
+import {
+  entryPlacement,
+  pitchY,
+  removePitch,
+  type EntryPlacement,
+} from "./entryPlacement";
 import { PlaybackControls } from "./PlaybackControls";
 import { ScoreIcon } from "./ScoreIcon";
 import { counterAt, parseCounter } from "./playbackPosition";
@@ -61,15 +68,7 @@ import {
   type Score,
   type Step,
 } from "../core/model";
-import {
-  add,
-  compare,
-  fromDecimal,
-  rat,
-  sub,
-  value,
-  ZERO,
-} from "../core/rational";
+import { add, compare, fromDecimal, sub, value, ZERO } from "../core/rational";
 import { GM, dynamicValues } from "../core/instruments";
 import { validateScore } from "../core/validation";
 import { demoScore } from "../core/demo";
@@ -170,8 +169,7 @@ export function App() {
     [dialog, setDialog] = useState<DialogSpec>(),
     [articulationValue, setArticulationValue] =
       useState<Articulation>("staccato"),
-    [showInspector, setShowInspector] = useState(false),
-    [showInstruments, setShowInstruments] = useState(false),
+    [openPanel, setOpenPanel] = useState<"instruments" | "inspector">(),
     [viewOptions, setViewOptions] = useState(defaultRenderOptions),
     [fitPage, setFitPage] = useState(false),
     [entryPitch, setEntryPitch] = useState<Pitch>({
@@ -188,7 +186,15 @@ export function App() {
     }>();
   const gesture = useRef<
     | {
-        kind: "region" | "pan" | "copy" | "note" | "shape" | "zoom";
+        kind:
+          | "region"
+          | "pan"
+          | "copy"
+          | "note"
+          | "shape"
+          | "zoom"
+          | "entry"
+          | "palette";
         x: number;
         y: number;
         left: number;
@@ -197,6 +203,9 @@ export function App() {
         last?: Hit;
         region?: Region;
         noteId?: string;
+        placement?: EntryPlacement;
+        duration?: Duration;
+        rest?: boolean;
         moved: boolean;
       }
     | undefined
@@ -253,6 +262,20 @@ export function App() {
     playRequest = useRef(0),
     animation = useRef<number>(0);
   const index = useMemo(() => new ScoreIndex(score), [score]);
+  const showInstruments = openPanel === "instruments",
+    showInspector = openPanel === "inspector";
+  const setShowInstruments = (show: boolean) =>
+    setOpenPanel((p) =>
+      show ? "instruments" : p === "instruments" ? undefined : p,
+    );
+  const setShowInspector = (show: boolean) =>
+    setOpenPanel((p) =>
+      show ? "inspector" : p === "inspector" ? undefined : p,
+    );
+  const closePanel = () => {
+    setOpenPanel(undefined);
+    scrollHost.current?.focus();
+  };
   const note = score.notes.find((n) => n.id === selected),
     staff =
       score.staves.find((s) => s.id === cursor.staffId) ?? score.staves[0],
@@ -1392,19 +1415,132 @@ export function App() {
       (e.clientY - bounds.top) / zoom,
     );
   };
+  const chooseEntry = (base: number, rest: boolean, reset = false) => {
+    setEntryDuration((d) => ({
+      ...d,
+      base,
+      ...(reset ? { dots: 0, tuplets: [] } : {}),
+    }));
+    setEntryRest(rest);
+    if (reset) setEntryAccidental(undefined);
+    pendingTuplet.current = undefined;
+    setMode("write");
+    setRegion(undefined);
+  };
+  const placementAt = (hit: Hit, d = entryDuration) =>
+    entryPlacement(
+      score,
+      layout!,
+      hit,
+      d,
+      cursor.voice,
+      entryAccidental,
+      concert,
+    );
+  const placeEntry = (
+    p: EntryPlacement,
+    d = entryDuration,
+    rest = entryRest,
+  ) => {
+    if (held.current || latchedRef.current) return;
+    setHover(undefined);
+    const existing = p.existing;
+    setEntryPitch(p.pitch);
+    if (existing?.pitches.length && !rest) {
+      const sameLine = existing.pitches.findIndex(
+        (q) => q.step === p.pitch.step && q.octave === p.pitch.octave,
+      );
+      if (sameLine < 0 || entryAccidental !== undefined) {
+        if (
+          commit((s) => {
+            const n = s.notes.find((n) => n.id === existing.id)!;
+            if (sameLine < 0) n.pitches.push(p.pitch);
+            else n.pitches[sameLine] = p.pitch;
+            cleanLinks(s);
+          })
+        ) {
+          setSelected(existing.id);
+          setRegion(undefined);
+          setCursor(p.at);
+          report(
+            sameLine < 0
+              ? `Added ${pitchName(p.pitch)} to chord`
+              : `Changed accidental on ${pitchName(p.pitch)}`,
+          );
+        }
+        return;
+      }
+    }
+    insert(
+      rest ? [] : existing?.pitches.length ? existing.pitches : [p.pitch],
+      p.at,
+      d,
+    );
+  };
+  const cancelEntryGesture = () => {
+    gesture.current = undefined;
+    setHover(undefined);
+    setDragRect(undefined);
+  };
+  // Captured palette events can arrive from outside the score or even over a panel.
+  const paletteHit = (e: { clientX: number; clientY: number }) => {
+    const bounds = scrollHost.current?.getBoundingClientRect();
+    if (
+      !bounds ||
+      e.clientX < bounds.left ||
+      e.clientX >= bounds.right ||
+      e.clientY < bounds.top ||
+      e.clientY >= bounds.bottom
+    )
+      return;
+    const top = document.elementFromPoint?.(e.clientX, e.clientY);
+    if (top && !scrollHost.current?.contains(top)) return;
+    return pointer(e);
+  };
+  const paletteDown = (
+    e: React.PointerEvent<HTMLButtonElement>,
+    base: number,
+    rest: boolean,
+  ) => {
+    if (e.button !== 0 || held.current || latchedRef.current) return;
+    chooseEntry(base, rest);
+    setHover(undefined);
+    gesture.current = {
+      kind: "palette",
+      x: e.clientX,
+      y: e.clientY,
+      left: 0,
+      top: 0,
+      moved: false,
+      duration: { ...entryDuration, base },
+      rest,
+    };
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    e.preventDefault();
+  };
+  const paletteMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const g = gesture.current;
+    if (g?.kind !== "palette") return;
+    if (Math.hypot(e.clientX - g.x, e.clientY - g.y) > 4) g.moved = true;
+    if (g.moved) setHover(paletteHit(e));
+  };
+  const paletteUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const g = gesture.current;
+    gesture.current = undefined;
+    if (e.currentTarget.hasPointerCapture?.(e.pointerId))
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    const hit = g?.kind === "palette" && g.moved ? paletteHit(e) : undefined;
+    if (hit) {
+      placeEntry(placementAt(hit, g!.duration), g!.duration, g!.rest);
+      scrollHost.current?.focus();
+    }
+    setHover(undefined);
+  };
   const selectHit = (hit: Hit, e: React.PointerEvent<HTMLDivElement>) => {
     if (held.current || latchedRef.current) return;
-    const bounds = host.current!.getBoundingClientRect(),
-      x = (e.clientX - bounds.left) / zoom,
-      y = (e.clientY - bounds.top) / zoom;
-    const nearby = layout!.notes
-      .filter(
-        (n) =>
-          n.measureId === hit.measure.measureId &&
-          n.staffId === hit.staffId &&
-          Math.abs(n.x - x) < 18,
-      )
-      .sort((a, b) => Math.abs(a.y - y) - Math.abs(b.y - y))[0];
+    const resolved = placementAt(hit);
+    const nearby = resolved.existing;
+    if (mode === "erase" && !resolved.onNotehead) return;
     if (
       nearby &&
       (mode === "speedy" ||
@@ -1413,7 +1549,7 @@ export function App() {
         e.ctrlKey ||
         e.metaKey)
     ) {
-      const existing = score.notes.find((n) => n.id === nearby.id)!;
+      const existing = nearby;
       setSelected(existing.id);
       setCursor({
         staffId: existing.staffId,
@@ -1424,14 +1560,19 @@ export function App() {
       setPanel("note");
       setRegion(undefined);
       setEntryPitch(existing.pitches[0] ?? entryPitch);
-      if (mode === "erase")
-        commit((s) => {
-          s.notes = s.notes.filter((n) => n.id !== existing.id);
-          for (const n of s.notes) {
-            if (n.tieTo === existing.id) delete n.tieTo;
-            if (n.slurTo === existing.id) delete n.slurTo;
-          }
-        });
+      if (mode === "erase") {
+        if (
+          commit((s) => {
+            removePitch(s, existing.id, resolved.pitchIndex);
+            cleanLinks(s);
+          })
+        )
+          report(
+            existing.pitches.length > 1
+              ? "Removed chord tone."
+              : "Removed entry.",
+          );
+      }
       if (mode === "articulation") {
         commit((s) => {
           const n = s.notes.find((n) => n.id === existing.id)!;
@@ -1441,78 +1582,14 @@ export function App() {
       }
       return;
     }
-    if (nearby && mode === "write" && !e.ctrlKey && !e.metaKey && !entryRest) {
-      const existing = score.notes.find((n) => n.id === nearby.id)!;
-      const pitch = {
-        ...hit.pitch,
-        alter: keyAlter(hit.pitch.step, measure.key),
-      };
-      if (
-        existing.pitches.length &&
-        !existing.pitches.some((p) => midiPitch(p) === midiPitch(pitch)) &&
-        Math.abs(nearby.y - y) > 5
-      ) {
-        if (
-          commit((s) => {
-            s.notes.find((n) => n.id === existing.id)!.pitches.push(pitch);
-          })
-        ) {
-          setSelected(existing.id);
-          setRegion(undefined);
-        }
-        return;
-      }
-      insert(
-        existing.pitches,
-        {
-          staffId: existing.staffId,
-          measureId: existing.measureId,
-          offset: existing.offset,
-          voice: existing.voice,
-        },
-        entryDuration,
-      );
-      return;
-    }
-    const unit = value(beats(entryDuration)),
-      snap = Math.max(
-        0,
-        Math.min(
-          hit.measure.length - unit,
-          Math.round(value(hit.offset) / unit) * unit,
-        ),
-      );
-    const at = {
-      staffId: hit.staffId,
-      measureId: hit.measure.measureId,
-      offset: fromDecimal(snap),
-      voice: cursor.voice,
-    };
-    // Entry grid uses the duration's exact denominator, including tuplets.
-    at.offset = rat(
-      Math.round(snap / unit) * beats(entryDuration).n,
-      beats(entryDuration).d,
-    );
+    const placement = placementAt(hit),
+      at = placement.at;
     setCursor(at);
     setSelected(undefined);
     setEntryPitch({
-      ...hit.pitch,
-      alter: keyAlter(hit.pitch.step, measure.key),
+      ...placement.pitch,
     });
     setRegion(undefined);
-    if (mode === "write") {
-      const pitch = {
-        ...hit.pitch,
-        alter: keyAlter(
-          hit.pitch.step,
-          score.measures[hit.measure.measureIndex].key,
-        ),
-      };
-      insert(
-        entryRest ? [] : [{ ...pitch, alter: entryAccidental ?? pitch.alter }],
-        at,
-      );
-    }
   };
 
   const pointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1656,16 +1733,26 @@ export function App() {
       setPanel("note");
       return;
     }
+    if (mode === "write" && !e.ctrlKey && !e.metaKey) {
+      gesture.current = {
+        kind: "entry",
+        x: e.clientX,
+        y: e.clientY,
+        left: 0,
+        top: 0,
+        hit,
+        last: hit,
+        placement: placementAt(hit),
+        moved: false,
+      };
+      setHover(hit);
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+      return;
+    }
     selectHit(hit, e);
     if ((mode === "write" && (e.ctrlKey || e.metaKey)) || mode === "speedy") {
-      const bounds = host.current!.getBoundingClientRect(),
-        x = (e.clientX - bounds.left) / zoom;
-      const closest = layout?.notes.find(
-        (n) =>
-          n.staffId === hit.staffId &&
-          n.measureId === hit.measure.measureId &&
-          Math.abs(n.x - x) < 18,
-      );
+      const closest = placementAt(hit).existing;
       if (closest) {
         gesture.current = {
           kind: "note",
@@ -1693,6 +1780,14 @@ export function App() {
     const g = gesture.current;
     if (!g) return;
     if (Math.hypot(e.clientX - g.x, e.clientY - g.y) > 4) g.moved = true;
+    if (
+      g.kind === "entry" &&
+      hit &&
+      g.hit &&
+      (hit.pitch.step !== g.hit.pitch.step ||
+        hit.pitch.octave !== g.hit.pitch.octave)
+    )
+      g.moved = true;
     if (g.kind === "pan") {
       if (scrollHost.current) {
         scrollHost.current.scrollLeft = g.left - (e.clientX - g.x);
@@ -1732,6 +1827,55 @@ export function App() {
       e.currentTarget.releasePointerCapture(e.pointerId);
     if (g.kind === "pan") {
       suppressContext.current = g.moved;
+      return;
+    }
+    if (g.kind === "entry") {
+      const surface = document.elementFromPoint?.(e.clientX, e.clientY);
+      if (surface && !host.current?.parentElement?.contains(surface)) {
+        setHover(undefined);
+        return;
+      }
+      const hit = pointer(e);
+      if (!hit || held.current || latchedRef.current) return;
+      const original = g.placement!;
+      const existing = original.existing;
+      const display = existing?.pitches[original.pitchIndex];
+      const sameHead =
+        display &&
+        display.step === original.pitch.step &&
+        display.octave === original.pitch.octave;
+      if (g.moved && sameHead && !entryRest) {
+        if (
+          hit.staffId !== original.at.staffId ||
+          hit.measure.measureId !== original.at.measureId
+        )
+          return;
+        const pitch = placementAt(hit).pitch;
+        if (
+          existing.pitches.some(
+            (p, i) =>
+              i !== original.pitchIndex && midiPitch(p) === midiPitch(pitch),
+          )
+        ) {
+          report("That pitch is already in the chord.");
+          return;
+        }
+        if (
+          commit((s) => {
+            s.notes.find((n) => n.id === existing.id)!.pitches[
+              original.pitchIndex
+            ] = pitch;
+            cleanLinks(s);
+          })
+        ) {
+          setSelected(existing.id);
+          setCursor(original.at);
+          setEntryPitch(pitch);
+          setRegion(undefined);
+          setHover(undefined);
+          report(`Moved note to ${pitchName(pitch)}`);
+        }
+      } else placeEntry(placementAt(hit));
       return;
     }
     const end = g.last ?? g.hit;
@@ -2071,6 +2215,15 @@ export function App() {
     const down = (e: KeyboardEvent) => {
       if (e.code === "Escape") {
         e.preventDefault();
+        if (
+          !held.current &&
+          !latchedRef.current &&
+          !playing &&
+          !dialog &&
+          !help
+        )
+          closePanel();
+        cancelEntryGesture();
         stop();
         setHelp(false);
         setDialog(undefined);
@@ -2079,6 +2232,7 @@ export function App() {
         return;
       }
       if (editable(e.target) || e.isComposing || dialog || help) return;
+      if (mode === "write" && e.code !== "Space") setHover(undefined);
       if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
         shift.current = true;
         refreshAudition();
@@ -2087,6 +2241,7 @@ export function App() {
       if (e.code === "Space") {
         e.preventDefault();
         if (e.repeat || held.current || help) return;
+        gesture.current = undefined;
         lastAudition.current = undefined;
         held.current = true;
         pauseOffset.current = undefined;
@@ -2747,9 +2902,15 @@ export function App() {
         } else refreshAudition();
       }
     };
-    const blur = () => stop();
+    const blur = () => {
+      stop();
+      cancelEntryGesture();
+    };
     const hidden = () => {
-      if (document.hidden) stop();
+      if (document.hidden) {
+        stop();
+        cancelEntryGesture();
+      }
     };
     const focus = (e: FocusEvent) => {
       if (editable(e.target) && (held.current || latchedRef.current)) stop();
@@ -2805,6 +2966,26 @@ export function App() {
       (m) => m.measureId === cursor.measureId,
     ),
     cursorStaff = cursorBox?.staves.find((s) => s.id === cursor.staffId);
+  const previewPitch =
+    concert && instrument.transpose
+      ? pitchFromMidi(midiPitch(entryPitch) + instrument.transpose)
+      : entryPitch;
+  const entryPreview =
+    mode === "write" && !auditioning && !playing && !dialog && !help && layout
+      ? hover
+        ? placementAt(hover)
+        : cursorBox && cursorStaff
+          ? {
+              at: cursor,
+              pitch: entryPitch,
+              displayPitch: previewPitch,
+              x: xAtTime(cursorBox, value(cursor.offset)),
+              y: pitchY(previewPitch, cursorStaff.clef, cursorStaff.lineBottom),
+              bottom: cursorStaff.lineBottom,
+              pitchIndex: 0,
+            }
+          : undefined
+      : undefined;
   const activePosition = playing
     ? playhead
     : auditioning
@@ -2899,10 +3080,65 @@ export function App() {
             setMaster(n);
             audio.volume(n);
           }}
-          instruments={showInstruments}
-          inspector={showInspector}
         />
       )}
+      <div
+        className="workspace-bar"
+        role="toolbar"
+        aria-label="Workspace controls"
+      >
+        <div className="entry-hint">
+          {mode === "write" ? (
+            <>
+              <strong>Simple Entry</strong>
+              <span>
+                Click the staff to add · drag a note to move · Ctrl-click to
+                select
+              </span>
+            </>
+          ) : mode === "erase" ? (
+            <>
+              <strong>Eraser</strong>
+              <span>Click a notehead to remove it · Ctrl+Z to undo</span>
+            </>
+          ) : mode === "speedy" ? (
+            <>
+              <strong>Speedy Entry</strong>
+              <span>Choose pitch, then duration · 0 closes the frame</span>
+            </>
+          ) : (
+            <>
+              <strong>
+                {mode === "select"
+                  ? "Selection"
+                  : mode[0].toUpperCase() + mode.slice(1)}
+              </strong>
+              <span>
+                Click a measure · Shift-click to extend · drag to select a
+                region
+              </span>
+            </>
+          )}
+        </div>
+        <div className="panel-toggles">
+          <button
+            aria-pressed={showInstruments}
+            className={showInstruments ? "selected" : ""}
+            onClick={() => command("instruments")}
+          >
+            <ScoreIcon name="staff" />
+            Instruments
+          </button>
+          <button
+            aria-pressed={showInspector}
+            className={showInspector ? "selected" : ""}
+            onClick={() => command("inspector")}
+          >
+            <ScoreIcon name="expression" />
+            Inspector
+          </button>
+        </div>
+      </div>
       <div className="workspace">
         {(palettes.notePalette || palettes.restPalette) && (
           <EntryPalette
@@ -2913,18 +3149,15 @@ export function App() {
             showNotes={palettes.notePalette}
             showRests={palettes.restPalette}
             command={command}
-            choose={(base, rest, reset) => {
-              setEntryDuration((d) => ({
-                ...d,
-                base,
-                ...(reset ? { dots: 0, tuplets: [] } : {}),
-              }));
-              setEntryRest(rest);
-              if (reset) setEntryAccidental(undefined);
-              pendingTuplet.current = undefined;
-              setMode("write");
+            choose={chooseEntry}
+            drag={{
+              down: paletteDown,
+              move: paletteMove,
+              up: paletteUp,
+              cancel: cancelEntryGesture,
             }}
             modify={(kind, n) => {
+              setMode("write");
               if (kind === "dot")
                 setEntryDuration((d) => ({ ...d, dots: (d.dots + 1) % 3 }));
               if (kind === "accidental")
@@ -2952,6 +3185,7 @@ export function App() {
               newProgram,
               setNewProgram,
               addInstrument,
+              close: closePanel,
             }}
           />
         )}
@@ -3015,7 +3249,7 @@ export function App() {
               }}
             >
               <div
-                className="paper"
+                className={"paper mode-" + mode}
                 style={{
                   transform: `scale(${zoom})`,
                   width: layout?.width ?? 1000,
@@ -3032,9 +3266,11 @@ export function App() {
                 onPointerDown={pointerDown}
                 onPointerUp={pointerUp}
                 onPointerCancel={() => {
-                  gesture.current = undefined;
-                  setDragRect(undefined);
+                  cancelEntryGesture();
                   if (held.current) stop();
+                }}
+                onLostPointerCapture={() => {
+                  if (gesture.current) cancelEntryGesture();
                 }}
                 onDoubleClick={doubleClick}
                 onContextMenu={(e) => {
@@ -3059,12 +3295,27 @@ export function App() {
                     );
                   }
                   setContextMenu({
-                    x: Math.min(e.clientX, window.innerWidth - 240),
-                    y: Math.min(e.clientY, window.innerHeight - 390),
+                    x: Math.max(
+                      8,
+                      Math.min(e.clientX, window.innerWidth - 288),
+                    ),
+                    y: Math.max(
+                      8,
+                      Math.min(e.clientY, window.innerHeight - 390),
+                    ),
                   });
                 }}
               >
                 <div ref={host} className="engraving" />
+                {entryPreview && (
+                  <EntryPreview
+                    placement={entryPreview}
+                    duration={entryDuration}
+                    rest={entryRest}
+                    keyboard={!hover}
+                    accidental={entryAccidental}
+                  />
+                )}
                 {region &&
                   layout &&
                   selectionRects(score, layout, region).map((r) => (
@@ -3278,7 +3529,18 @@ export function App() {
           </div>
         </main>
         {showInspector && (
-          <aside className="inspector">
+          <aside className="inspector" aria-label="Inspector panel">
+            <div className="panel-heading">
+              <h2>Inspector</h2>
+              <button
+                className="panel-close"
+                aria-label="Close inspector"
+                title="Close inspector (Esc)"
+                onClick={closePanel}
+              >
+                ×
+              </button>
+            </div>
             <div className="inspector-tabs">
               <button
                 className={panel === "note" ? "selected" : ""}

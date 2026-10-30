@@ -27,12 +27,11 @@ import {
   measureStarts,
   pitchFromMidi,
   midiPitch,
-  keySignatures,
+  transposeKey,
   type Score,
   type NoteEvent,
   type Pitch,
   type Duration,
-  type Step,
 } from "../core/model";
 import { value, compare, ZERO, type Rational } from "../core/rational";
 import { xAtTime, type Layout, type MeasureBox } from "./geometry";
@@ -83,24 +82,6 @@ interface Glyph {
   offset: Rational;
   span: Rational;
   tuplets: Duration["tuplets"];
-}
-function concertKey(key: string, transpose: number) {
-  const tonic = (name: string) =>
-    midiPitch({
-      step: name[0] as Step,
-      alter: name.includes("#") ? 1 : name.includes("b") ? -1 : 0,
-      octave: 4,
-    }) % 12;
-  const target = (((tonic(key) + transpose) % 12) + 12) % 12;
-  return (
-    [...keySignatures]
-      .filter((k) => tonic(k) === target)
-      .sort(
-        (a, b) =>
-          Math.abs(keySignatures.indexOf(a) - 7) -
-          Math.abs(keySignatures.indexOf(b) - 7),
-      )[0] ?? key
-  );
 }
 
 export function renderScore(
@@ -214,7 +195,7 @@ export function renderScore(
         const instrument = score.instruments.find(
           (i) => i.id === staff.instrumentId,
         )!;
-        const key = concert ? concertKey(m.key, instrument.transpose) : m.key;
+        const key = concert ? transposeKey(m.key, instrument.transpose) : m.key;
         const stave = new Stave(x, systemY + si * staffGap, barWidth);
         if (col === 0) stave.addClef(staff.clef).addKeySignature(key);
         else if (m.key !== score.measures[mi - 1].key)

@@ -14,6 +14,7 @@ import type { DesiredVoice } from "../src/performance/compiler";
 const audio = vi.hoisted(() => ({
   instances: [] as any[],
   score: undefined as any,
+  noteBoxes: false,
 }));
 vi.mock("../src/audio/controller", () => ({
   AudioController: class {
@@ -59,7 +60,29 @@ vi.mock("../src/engraving/render", () => ({
     {
       width: 1120,
       height: 800,
-      notes: [],
+      notes: audio.noteBoxes
+        ? score.notes
+            .filter((n: any) => n.measureId === score.measures[0].id)
+            .map((n: any) => {
+              const si = score.staves.findIndex((s: any) => s.id === n.staffId);
+              const p = n.pitches[0];
+              return {
+                id: n.id,
+                staffId: n.staffId,
+                measureId: n.measureId,
+                offset: n.offset,
+                x: (n.offset.n / n.offset.d) * 250,
+                y: p
+                  ? si * 100 +
+                    80 -
+                    (p.octave * 7 +
+                      ["C", "D", "E", "F", "G", "A", "B"].indexOf(p.step) -
+                      (score.staves[si].clef === "bass" ? 18 : 30)) *
+                      5
+                  : si * 100 + 60,
+              };
+            })
+        : [],
       measures: [
         {
           measureId: score.measures[0].id,
@@ -473,6 +496,7 @@ describe("familiar score editing gestures", () => {
 
 beforeEach(async () => {
   audio.instances.length = 0;
+  audio.noteBoxes = false;
   Object.defineProperty(document, "fonts", {
     configurable: true,
     value: { ready: Promise.resolve() },
@@ -514,6 +538,306 @@ async function hold(extra = {}) {
   await waitFor(() => expect(engine().audition).toHaveBeenCalled());
 }
 const lastVoices = (): DesiredVoice[] => engine().audition.mock.calls.at(-1)[0];
+
+describe("mouse entry and dismissible workspace", () => {
+  const paper = () => document.querySelector(".paper")!;
+  const press = (x: number, y: number) =>
+    fireEvent.pointerDown(paper(), { clientX: x, clientY: y, button: 0 });
+  const release = (x: number, y: number) =>
+    fireEvent.pointerUp(paper(), { clientX: x, clientY: y, button: 0 });
+  const click = (x: number, y: number) => {
+    press(x, y);
+    release(x, y);
+  };
+  const geometry = () => {
+    audio.noteBoxes = true;
+    fireEvent.click(screen.getByRole("button", { name: "Written pitch" }));
+    fireEvent.click(screen.getByRole("button", { name: "Concert pitch" }));
+  };
+  const barNotes = () =>
+    audio.score.notes.filter(
+      (n: any) =>
+        n.staffId === audio.score.staves[0].id &&
+        n.measureId === audio.score.measures[0].id,
+    );
+  const durationButton = (base = 4) =>
+    screen.getByRole("button", { name: `Duration ${base}` });
+  const paletteDrag = (kind: "down" | "move" | "up", x: number, y: number) =>
+    fireEvent[
+      kind === "down"
+        ? "pointerDown"
+        : kind === "move"
+          ? "pointerMove"
+          : "pointerUp"
+    ](durationButton(), { clientX: x, clientY: y, button: 0 });
+  const viewport = () =>
+    vi
+      .spyOn(document.querySelector(".score-scroll")!, "getBoundingClientRect")
+      .mockReturnValue({
+        left: 0,
+        top: 0,
+        right: 850,
+        bottom: 400,
+        width: 850,
+        height: 400,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+  it("each panel closes itself and restores score keyboard focus", () => {
+    fireEvent.click(screen.getByRole("button", { name: "Instruments" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close instruments" }));
+    expect(document.querySelector(".instruments")).toBeNull();
+    expect(document.activeElement).toBe(
+      document.querySelector(".score-scroll"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close inspector" }));
+    expect(document.querySelector(".inspector")).toBeNull();
+  });
+  it("opens one panel at a time and Escape dismisses it", () => {
+    fireEvent.click(screen.getByRole("button", { name: "Instruments" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
+    expect(document.querySelector(".instruments")).toBeNull();
+    keyDown("Escape");
+    expect(document.querySelector(".inspector")).toBeNull();
+  });
+  it("hover displays a notehead without changing the score", () => {
+    const before = JSON.stringify(audio.score);
+    fireEvent.click(durationButton(8));
+    point(330, 47);
+    expect(
+      document.querySelector(".entry-preview")?.getAttribute("aria-label"),
+    ).toBe("Note preview C5");
+    expect(JSON.stringify(audio.score)).toBe(before);
+  });
+  it("mouse entry commits once on release and exactly at the previewed position", () => {
+    fireEvent.click(durationButton());
+    point(330, 47);
+    const offset = document
+      .querySelector(".entry-preview")!
+      .getAttribute("data-offset");
+    const before = JSON.stringify(audio.score);
+    press(330, 47);
+    point(330, 47);
+    expect(JSON.stringify(audio.score)).toBe(before);
+    release(330, 47);
+    const n = barNotes().find(
+      (n: any) => `${n.offset.n}/${n.offset.d}` === offset,
+    );
+    expect(n.pitches).toEqual([{ step: "C", octave: 5, alter: 0 }]);
+    keyDown("KeyZ", { ctrlKey: true });
+    expect(JSON.stringify(audio.score)).toBe(before);
+  });
+  it.each(["Escape", "pointercancel", "blur"])(
+    "cancels a pending mouse insertion on %s",
+    (kind) => {
+      fireEvent.click(durationButton());
+      const before = JSON.stringify(audio.score);
+      press(330, 47);
+      if (kind === "Escape") keyDown("Escape");
+      else if (kind === "blur") fireEvent.blur(window);
+      else fireEvent.pointerCancel(paper());
+      release(330, 47);
+      expect(JSON.stringify(audio.score)).toBe(before);
+    },
+  );
+  it("drops a palette duration onto the score without requiring an initial click", () => {
+    viewport();
+    const before = JSON.stringify(audio.score);
+    paletteDrag("down", -15, 50);
+    paletteDrag("move", 330, 47);
+    expect(
+      document.querySelector(".entry-preview")?.getAttribute("aria-label"),
+    ).toBe("Note preview C5");
+    expect(JSON.stringify(audio.score)).toBe(before);
+    paletteDrag("up", 330, 47);
+    expect(
+      barNotes().some((n: any) =>
+        n.pitches.some((p: any) => p.step === "C" && p.octave === 5),
+      ),
+    ).toBe(true);
+    keyDown("KeyZ", { ctrlKey: true });
+    expect(JSON.stringify(audio.score)).toBe(before);
+  });
+  it.each(["outside", "Escape", "pointercancel", "blur"])(
+    "palette dragging cancels on %s",
+    (kind) => {
+      viewport();
+      const before = JSON.stringify(audio.score);
+      paletteDrag("down", -15, 50);
+      paletteDrag("move", 330, 47);
+      if (kind === "Escape") keyDown("Escape");
+      else if (kind === "pointercancel")
+        fireEvent.pointerCancel(durationButton());
+      else if (kind === "blur") fireEvent.blur(window);
+      paletteDrag("up", kind === "outside" ? -20 : 330, 47);
+      expect(JSON.stringify(audio.score)).toBe(before);
+    },
+  );
+  it("clicking a written rest with a note duration turns it into a note", () => {
+    geometry();
+    fireEvent.click(screen.getByRole("button", { name: "Rest duration 4" }));
+    click(216, 42.5);
+    expect(barNotes().find((n: any) => n.offset.n === 1).pitches).toEqual([]);
+    fireEvent.click(durationButton());
+    click(216, 47);
+    expect(barNotes().find((n: any) => n.offset.n === 1).pitches).toEqual([
+      { step: "C", octave: 5, alter: 0 },
+    ]);
+  });
+  it("adds chord tones and erases only the clicked pitch", () => {
+    geometry();
+    fireEvent.click(durationButton());
+    click(216, 47);
+    expect(barNotes().find((n: any) => n.offset.n === 1).pitches).toHaveLength(
+      2,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Eraser" }));
+    click(216, 47);
+    expect(barNotes().find((n: any) => n.offset.n === 1).pitches).toEqual([
+      { step: "D", octave: 5, alter: 0 },
+    ]);
+  });
+  it("applies a palette accidental to the clicked chord tone", () => {
+    geometry();
+    fireEvent.click(durationButton());
+    fireEvent.click(screen.getByRole("button", { name: "Sharp" }));
+    click(216, 42.5);
+    expect(barNotes().find((n: any) => n.offset.n === 1).pitches).toEqual([
+      { step: "D", octave: 5, alter: 1 },
+    ]);
+  });
+  it("eraser clicks away from a notehead do not erase a note in the same vertical column", () => {
+    geometry();
+    const before = JSON.stringify(audio.score);
+    fireEvent.click(screen.getByRole("button", { name: "Eraser" }));
+    click(216, 10);
+    expect(JSON.stringify(audio.score)).toBe(before);
+  });
+  it("dragging a notehead moves that pitch in one undo step", () => {
+    geometry();
+    fireEvent.click(durationButton());
+    const before = JSON.stringify(audio.score);
+    press(216, 42.5);
+    point(216, 47);
+    expect(JSON.stringify(audio.score)).toBe(before);
+    release(216, 47);
+    expect(barNotes().find((n: any) => n.offset.n === 1).pitches).toEqual([
+      { step: "C", octave: 5, alter: 0 },
+    ]);
+    keyDown("KeyZ", { ctrlKey: true });
+    expect(JSON.stringify(audio.score)).toBe(before);
+  });
+  it("Ctrl-click followed by Delete removes the selected event, and Undo restores it", () => {
+    geometry();
+    fireEvent.click(durationButton());
+    const before = JSON.stringify(audio.score);
+    fireEvent.pointerDown(paper(), {
+      clientX: 216,
+      clientY: 42.5,
+      button: 0,
+      ctrlKey: true,
+    });
+    release(216, 42.5);
+    keyDown("Delete");
+    expect(barNotes().some((n: any) => n.offset.n === 1)).toBe(false);
+    keyDown("KeyZ", { ctrlKey: true });
+    expect(JSON.stringify(audio.score)).toBe(before);
+  });
+  it("Ctrl-click in empty space places the caret without inserting music", () => {
+    fireEvent.click(durationButton());
+    const before = JSON.stringify(audio.score);
+    fireEvent.pointerDown(paper(), {
+      clientX: 330,
+      clientY: 47,
+      button: 0,
+      ctrlKey: true,
+    });
+    release(330, 47);
+    expect(JSON.stringify(audio.score)).toBe(before);
+  });
+  it("hides the insertion preview and cancels pending entry while Space auditions", async () => {
+    fireEvent.click(durationButton());
+    const before = JSON.stringify(audio.score);
+    press(330, 47);
+    keyDown("Space");
+    await waitFor(() => expect(engine().enable).toHaveBeenCalled());
+    expect(document.querySelector(".entry-preview")).toBeNull();
+    release(330, 47);
+    keyUp("Space");
+    expect(JSON.stringify(audio.score)).toBe(before);
+  });
+  it("rest preview follows the rest palette, and changes back to a note preview", () => {
+    fireEvent.click(screen.getByRole("button", { name: "Rest duration 8" }));
+    point(330, 47);
+    expect(
+      document.querySelector(".entry-preview")?.getAttribute("aria-label"),
+    ).toBe("Rest preview");
+    fireEvent.click(durationButton(8));
+    point(330, 47);
+    expect(
+      document.querySelector(".entry-preview")?.getAttribute("aria-label"),
+    ).toBe("Note preview C5");
+  });
+  it("writes the active layer without changing a coincident note in another layer", () => {
+    geometry();
+    const before = barNotes().map((n: any) => JSON.stringify(n));
+    fireEvent.click(screen.getByRole("button", { name: "Layer 2" }));
+    fireEvent.click(durationButton());
+    click(216, 47);
+    expect(
+      barNotes()
+        .filter((n: any) => n.voice === 0)
+        .map((n: any) => JSON.stringify(n)),
+    ).toEqual(before);
+    expect(barNotes().find((n: any) => n.voice === 1).pitches).toEqual([
+      { step: "C", alter: 0, octave: 5 },
+    ]);
+  });
+  it("resolves note entry under zoom and a displaced score viewport", () => {
+    geometry();
+    fireEvent.change(screen.getByRole("combobox", { name: "Zoom" }), {
+      target: { value: "50" },
+    });
+    vi.spyOn(
+      document.querySelector(".engraving")!,
+      "getBoundingClientRect",
+    ).mockReturnValue({
+      left: 60,
+      top: 120,
+      right: 620,
+      bottom: 520,
+      width: 560,
+      height: 400,
+      x: 60,
+      y: 120,
+      toJSON: () => ({}),
+    });
+    fireEvent.click(durationButton());
+    point(187.5, 147.5);
+    expect(
+      document.querySelector(".entry-preview")?.getAttribute("data-offset"),
+    ).toBe("1/1");
+    click(187.5, 147.5);
+    expect(
+      barNotes().find((n: any) => n.offset.n === 1).pitches,
+    ).toContainEqual({ step: "C", alter: 0, octave: 5 });
+  });
+  it("Escape cancellation is not reversed by the synthetic click after palette release", () => {
+    viewport();
+    paletteDrag("down", -15, 50);
+    paletteDrag("move", 330, 47);
+    keyDown("Escape");
+    paletteDrag("up", 330, 47);
+    fireEvent.click(durationButton(), { detail: 1 });
+    expect(
+      screen
+        .getByRole("button", { name: "Selection (Esc)" })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+});
 
 describe("Space audition input lifecycle", () => {
   it("cancels a pending Play request when Escape arrives during startup", async () => {

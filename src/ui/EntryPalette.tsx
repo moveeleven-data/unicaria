@@ -11,6 +11,7 @@ export function EntryPalette({
   choose,
   modify,
   command,
+  drag,
 }: {
   duration: Duration;
   mode: string;
@@ -21,6 +22,16 @@ export function EntryPalette({
   choose: (base: number, rest: boolean, reset?: boolean) => void;
   modify: (kind: "dot" | "accidental" | "tuplet", value?: number) => void;
   command: (action: string) => void;
+  drag: {
+    down: (
+      e: React.PointerEvent<HTMLButtonElement>,
+      base: number,
+      rest: boolean,
+    ) => void;
+    move: (e: React.PointerEvent<HTMLButtonElement>) => void;
+    up: (e: React.PointerEvent<HTMLButtonElement>) => void;
+    cancel: () => void;
+  };
 }) {
   const button = (
     label: string,
@@ -52,11 +63,18 @@ export function EntryPalette({
             <button
               key={base}
               aria-label={`Duration ${base}`}
-              title={`1/${base} note`}
+              title={`1/${base} note · click, then click the staff; or drag onto the staff`}
               aria-pressed={!rest && duration.base === base}
               className={!rest && duration.base === base ? "selected" : ""}
-              onClick={() => choose(base, false)}
+              onClick={(e) => {
+                if (e.detail === 0) choose(base, false);
+              }}
               onDoubleClick={() => choose(base, false, true)}
+              onPointerDown={(e) => drag.down(e, base, false)}
+              onPointerMove={drag.move}
+              onPointerUp={drag.up}
+              onPointerCancel={drag.cancel}
+              onLostPointerCapture={drag.cancel}
             >
               <ScoreIcon name="note" base={base} />
             </button>
@@ -93,11 +111,18 @@ export function EntryPalette({
             <button
               key={base}
               aria-label={`Rest duration ${base}`}
-              title={`1/${base} rest`}
+              title={`1/${base} rest · click, then click the staff; or drag onto the staff`}
               aria-pressed={rest && duration.base === base}
               className={rest && duration.base === base ? "selected" : ""}
-              onClick={() => choose(base, true)}
+              onClick={(e) => {
+                if (e.detail === 0) choose(base, true);
+              }}
               onDoubleClick={() => choose(base, true, true)}
+              onPointerDown={(e) => drag.down(e, base, true)}
+              onPointerMove={drag.move}
+              onPointerUp={drag.up}
+              onPointerCancel={drag.cancel}
+              onLostPointerCapture={drag.cancel}
             >
               <ScoreIcon name="rest" base={base} />
             </button>
