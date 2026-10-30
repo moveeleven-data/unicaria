@@ -13,6 +13,8 @@ export function PlaybackControls({
   audioState,
   master,
   setMaster,
+  instruments,
+  inspector,
 }: {
   playing: boolean;
   paused: boolean;
@@ -25,6 +27,8 @@ export function PlaybackControls({
   audioState: string;
   master: number;
   setMaster: (n: number) => void;
+  instruments: boolean;
+  inspector: boolean;
 }) {
   const [draft, setDraft] = useState<string>();
   const edited = useRef(false);
@@ -107,17 +111,17 @@ export function PlaybackControls({
         <label className="elapsed-time">
           Time: <output>{time}</output>
         </label>
-      </div>
-      <div className="tempo">
-        <span>♩ =</span>
-        <input
-          aria-label="Tempo"
-          type="number"
-          min="20"
-          max="400"
-          value={tempo}
-          onChange={(e) => setTempo(Number(e.target.value))}
-        />
+        <div className="tempo">
+          <span>♩ =</span>
+          <input
+            aria-label="Tempo"
+            type="number"
+            min="20"
+            max="400"
+            value={tempo}
+            onChange={(e) => setTempo(Number(e.target.value))}
+          />
+        </div>
       </div>
       <div className="sound-controls">
         <button
@@ -140,6 +144,18 @@ export function PlaybackControls({
           value={master}
           onChange={(e) => setMaster(Number(e.target.value))}
         />
+        <button
+          className={instruments ? "selected" : ""}
+          onClick={() => command("instruments")}
+        >
+          Instruments
+        </button>
+        <button
+          className={inspector ? "selected" : ""}
+          onClick={() => command("inspector")}
+        >
+          Inspector
+        </button>
       </div>
     </div>
   );

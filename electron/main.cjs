@@ -64,7 +64,7 @@ app.whenReady().then(async () => {
     height: 1000,
     minWidth: 640,
     minHeight: 480,
-    backgroundColor: "#172a37",
+    backgroundColor: "#eef1ec",
     title: "Unicaria",
     autoHideMenuBar: true,
     show: false,

@@ -90,9 +90,7 @@ export function importMusicXml(source: string): MusicXmlResult {
   const doc = xmlDocument(source),
     root = doc.documentElement;
   if (root.localName !== "score-partwise")
-    throw new Error(
-      "Please export the score as score-partwise MusicXML.",
-    );
+    throw new Error("Please export the score as score-partwise MusicXML.");
   const parts = children(root, "part");
   if (!parts.length || parts.length > 64)
     throw new Error("The score must contain 1–64 parts.");

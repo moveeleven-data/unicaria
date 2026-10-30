@@ -3074,6 +3074,8 @@ export function App() {
               s.tempo = n;
             })
           }
+          instruments={showInstruments}
+          inspector={showInspector}
           audioState={audio.state}
           master={master}
           setMaster={(n) => {
@@ -3082,63 +3084,6 @@ export function App() {
           }}
         />
       )}
-      <div
-        className="workspace-bar"
-        role="toolbar"
-        aria-label="Workspace controls"
-      >
-        <div className="entry-hint">
-          {mode === "write" ? (
-            <>
-              <strong>Simple Entry</strong>
-              <span>
-                Click the staff to add · drag a note to move · Ctrl-click to
-                select
-              </span>
-            </>
-          ) : mode === "erase" ? (
-            <>
-              <strong>Eraser</strong>
-              <span>Click a notehead to remove it · Ctrl+Z to undo</span>
-            </>
-          ) : mode === "speedy" ? (
-            <>
-              <strong>Speedy Entry</strong>
-              <span>Choose pitch, then duration · 0 closes the frame</span>
-            </>
-          ) : (
-            <>
-              <strong>
-                {mode === "select"
-                  ? "Selection"
-                  : mode[0].toUpperCase() + mode.slice(1)}
-              </strong>
-              <span>
-                Click a measure · Shift-click to extend · drag to select a
-                region
-              </span>
-            </>
-          )}
-        </div>
-        <div className="panel-toggles">
-          <button
-            aria-pressed={showInstruments}
-            className={showInstruments ? "selected" : ""}
-            onClick={() => command("instruments")}
-          >
-            <ScoreIcon name="staff" />
-            Instruments
-          </button>
-          <button
-            aria-pressed={showInspector}
-            className={showInspector ? "selected" : ""}
-            onClick={() => command("inspector")}
-          >
-            <ScoreIcon name="expression" />
-            Inspector
-          </button>
-        </div>
-      </div>
       <div className="workspace">
         {(palettes.notePalette || palettes.restPalette) && (
           <EntryPalette
