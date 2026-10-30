@@ -57,8 +57,11 @@ function label(
   el.setAttribute("x", `${x}`);
   el.setAttribute("y", `${y}`);
   el.setAttribute("font-size", `${size}`);
-  el.setAttribute("fill", "#263833");
-  el.setAttribute("font-family", "Georgia, serif");
+  el.setAttribute("fill", "#242424");
+  el.setAttribute("font-weight", "normal");
+  // VexFlow's SVG root carries a stroke. Text must not inherit it.
+  el.setAttribute("stroke", "none");
+  el.setAttribute("font-family", "Times New Roman, serif");
   if (style) el.setAttribute("font-style", style);
   svg.appendChild(el);
   return el;
@@ -127,7 +130,7 @@ export function renderScore(
       width: page.width,
       height: page.height,
       fill: "#fffefb",
-      stroke: "#c8c8c4",
+      stroke: "#555555",
       "stroke-width": 1,
     }))
       paper.setAttribute(key, String(v));

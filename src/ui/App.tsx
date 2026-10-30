@@ -2,6 +2,11 @@ import { KeyboardGuide } from "./KeyboardGuide";
 import { ScoreSettings } from "./ScoreSettings";
 import { InstrumentPanel } from "./InstrumentPanel";
 import { MenuBar } from "./MenuBar";
+import { MainPalette } from "./MainPalette";
+import { EntryPalette } from "./EntryPalette";
+import { PlaybackControls } from "./PlaybackControls";
+import { ScoreIcon } from "./ScoreIcon";
+import { counterAt, parseCounter } from "./playbackPosition";
 import { CommandDialog, type DialogSpec } from "./CommandDialog";
 import {
   fullMeasures,
@@ -131,6 +136,11 @@ export function App() {
       | "select"
       | "write"
       | "speedy"
+      | "staff"
+      | "measure"
+      | "key"
+      | "time"
+      | "clef"
       | "hand"
       | "zoom"
       | "expression"
@@ -140,6 +150,22 @@ export function App() {
       | "slur"
       | "erase"
     >("select");
+  const [entryRest, setEntryRest] = useState(false),
+    [entryAccidental, setEntryAccidental] = useState<number>(),
+    [speedyActive, setSpeedyActive] = useState(true),
+    [palettes, setPalettes] = useState({
+      mainPalette: true,
+      playbackControls: true,
+      notePalette: true,
+      restPalette: true,
+    }),
+    [visiblePage, setVisiblePage] = useState(1),
+    [paused, setPaused] = useState(false),
+    [elapsed, setElapsed] = useState(0);
+  const pauseOffset = useRef<number | undefined>(undefined);
+  const pendingTuplet = useRef<
+    { actual: number; normal: number; remaining?: number } | undefined
+  >(undefined);
   const [region, setRegion] = useState<Region>(),
     [dialog, setDialog] = useState<DialogSpec>(),
     [articulationValue, setArticulationValue] =
@@ -240,6 +266,9 @@ export function App() {
     setError(bad);
   };
   const stop = () => {
+    pauseOffset.current = undefined;
+    setPaused(false);
+    setElapsed(0);
     lastAudition.current = undefined;
     playRequest.current++;
     held.current = false;
@@ -310,6 +339,9 @@ export function App() {
       undo.current.push(score);
       if (undo.current.length > 100) undo.current.shift();
       redo.current = [];
+      pauseOffset.current = undefined;
+      setPaused(false);
+      setElapsed(0);
       setScore(draft);
       setDirty(true);
       setPlaying(false);
@@ -456,11 +488,15 @@ export function App() {
       report(String(e), true);
     }
   };
-  const play = async (fromStart = false) => {
-    if (playing) {
+  const play = async (fromStart = false, sourceOverride?: number) => {
+    if (playing && sourceOverride === undefined && !fromStart) {
       stop();
       return;
     }
+    const resume =
+      !fromStart && sourceOverride === undefined
+        ? pauseOffset.current
+        : undefined;
     stop();
     const request = playRequest.current;
     try {
@@ -468,28 +504,64 @@ export function App() {
       if (request !== playRequest.current) return;
       const p = compilePerformance(index);
       performanceRef.current = p;
-      const source = value(absolute(index.starts, cursor));
+      const source = sourceOverride ?? value(absolute(index.starts, cursor));
       const occurrence = p.occurrences.find(
         (o) => source >= o.sourceStart && source < o.sourceStart + o.length,
       );
       const offset =
-        fromStart || !occurrence
+        resume ??
+        (fromStart || !occurrence
           ? 0
-          : p.secondsAt(occurrence.start + source - occurrence.sourceStart);
+          : p.secondsAt(occurrence.start + source - occurrence.sourceStart));
       audio.play(p, offset);
       setPlaying(true);
       const tick = () => {
         if (!audio.playing) return;
-        setPlayhead(
-          p.scoreAt(
-            Math.max(0, (audio.context?.currentTime ?? 0) - audio.playStart),
-          ),
+        const seconds = Math.max(
+          0,
+          (audio.context?.currentTime ?? 0) - audio.playStart,
         );
+        setElapsed(seconds);
+        setPlayhead(p.scoreAt(seconds));
         animation.current = requestAnimationFrame(tick);
       };
       tick();
     } catch (e) {
       report(String(e), true);
+    }
+  };
+  const pause = () => {
+    if (!playing) {
+      if (paused) void play();
+      return;
+    }
+    const offset = Math.max(
+      0,
+      (audio.context?.currentTime ?? 0) - audio.playStart,
+    );
+    playRequest.current++;
+    audio.stop();
+    cancelAnimationFrame(animation.current);
+    pauseOffset.current = offset;
+    setElapsed(offset);
+    setPlayhead(performanceRef.current?.scoreAt(offset));
+    setPlaying(false);
+    setPaused(true);
+  };
+  const seekCounter = (text: string) => {
+    try {
+      const next = parseCounter(score, text, cursor);
+      const wasPlaying = playing;
+      stop();
+      setCursor(next);
+      setSelected(undefined);
+      setRegion(undefined);
+      revealMeasure(score.measures.findIndex((m) => m.id === next.measureId));
+      if (wasPlaying) void play(false, value(absolute(index.starts, next)));
+      return true;
+    } catch (e) {
+      report(String(e instanceof Error ? e.message : e), true);
+      return false;
     }
   };
   const insert = (pitches: Pitch[], at = cursor, d = entryDuration) => {
@@ -516,6 +588,15 @@ export function App() {
       next = nextCursor(draft, destination, beats(d));
     });
     if (accepted && created) {
+      if (mode === "speedy" && pendingTuplet.current && d.tuplets.length) {
+        const group = pendingTuplet.current;
+        group.remaining =
+          (group.remaining ?? (4 / d.base) * group.normal) - value(beats(d));
+        if (group.remaining < 1e-8) {
+          pendingTuplet.current = undefined;
+          setEntryDuration({ ...d, tuplets: [] });
+        } else setEntryDuration(d);
+      }
       setRegion(undefined);
       setSelected(created);
       setCursor(next);
@@ -642,7 +723,7 @@ export function App() {
   };
   const zoomTo = (z: number, point?: { x: number; y: number }) => {
     const element = scrollHost.current;
-    const next = Math.max(0.1, Math.min(4, z));
+    const next = Math.max(0.1, Math.min(10, z));
     setFitWidth(false);
     setFitPage(false);
     if (element) {
@@ -683,6 +764,181 @@ export function App() {
   };
   const command = (action: string) => {
     setContextMenu(undefined);
+    if (action in palettes) {
+      setPalettes({
+        ...palettes,
+        [action]: !palettes[action as keyof typeof palettes],
+      });
+      return;
+    }
+    if (action === "play") {
+      void play();
+      return;
+    }
+    if (action === "pause") return pause();
+    if (action === "stop") return stop();
+    if (action === "enableAudio") {
+      void enable();
+      return;
+    }
+    if (["first", "previous", "next", "last"].includes(action)) {
+      const source = playhead ?? value(absolute(index.starts, cursor));
+      const current = Number(counterAt(score, source).split("|")[0]) - 1;
+      const at =
+        action === "first"
+          ? 0
+          : action === "last"
+            ? score.measures.length - 1
+            : Math.max(
+                0,
+                Math.min(
+                  score.measures.length - 1,
+                  current + (action === "next" ? 1 : -1),
+                ),
+              );
+      seekCounter(String(at + 1));
+      return;
+    }
+    if (action === "speedyFrame") {
+      setSpeedyActive(!speedyActive);
+      return;
+    }
+    if (action === "insertRest") {
+      insert([]);
+      return;
+    }
+    if (action === "tie" || action === "tiePrevious") {
+      if (!note) {
+        report("Select a note first.");
+        return;
+      }
+      commit((s) => {
+        let source = note;
+        if (action === "tiePrevious") {
+          const previous = s.notes
+            .filter(
+              (n) =>
+                n.staffId === note.staffId &&
+                n.voice === note.voice &&
+                compare(
+                  absolute(index.starts, n),
+                  absolute(index.starts, note),
+                ) < 0,
+            )
+            .sort((a, b) =>
+              compare(absolute(index.starts, b), absolute(index.starts, a)),
+            )[0];
+          if (!previous)
+            throw new Error("There is no previous note in this layer.");
+          source = previous;
+        }
+        connectNext(s, source.id, "tieTo");
+      });
+      return;
+    }
+    if (action === "tupletOptions") {
+      setDialog({
+        title: "Tuplet settings",
+        description:
+          "Choose the ratio for new entries. In Speedy Entry, Ctrl+3, Ctrl+5 or Ctrl+7 creates one group.",
+        fields: [
+          {
+            name: "ratio",
+            label: "Tuplet",
+            value: String(entryDuration.tuplets[0]?.actual ?? 0),
+            options: [
+              { value: "0", label: "Straight" },
+              { value: "3", label: "Triplet 3:2" },
+              { value: "5", label: "Quintuplet 5:4" },
+              { value: "7", label: "Septuplet 7:4" },
+            ],
+          },
+        ],
+        submit: "Apply",
+        apply: (v) => {
+          pendingTuplet.current = undefined;
+          setEntryDuration((d) => ({
+            ...d,
+            tuplets: Number(v.ratio)
+              ? [
+                  {
+                    actual: Number(v.ratio),
+                    normal: Number(v.ratio) === 3 ? 2 : 4,
+                  },
+                ]
+              : [],
+          }));
+        },
+      });
+      return;
+    }
+    if (action === "clefSettings") {
+      setDialog({
+        title: "Staff clef",
+        description: "Sets the clef for this entire staff.",
+        fields: [
+          {
+            name: "clef",
+            label: staff.name,
+            value: staff.clef,
+            options: ["treble", "bass", "alto", "tenor", "percussion"].map(
+              (c) => ({ value: c, label: c }),
+            ),
+          },
+        ],
+        submit: "Apply",
+        apply: (v) =>
+          commit((s) => {
+            s.staves.find((st) => st.id === staff.id)!.clef =
+              v.clef as typeof staff.clef;
+          }),
+      });
+      return;
+    }
+    if (action === "measureProperties") {
+      setDialog({
+        title: "Measure attributes",
+        fields: [
+          {
+            name: "start",
+            label: "Start repeat",
+            value: measure.repeatStart ? "yes" : "no",
+            options: [
+              { value: "no", label: "No" },
+              { value: "yes", label: "Yes" },
+            ],
+          },
+          {
+            name: "end",
+            label: "End repeat",
+            value: measure.repeatEnd ? "yes" : "no",
+            options: [
+              { value: "no", label: "No" },
+              { value: "yes", label: "Yes" },
+            ],
+          },
+          {
+            name: "ending",
+            label: "Ending",
+            value: measure.ending ?? 0,
+            options: [
+              { value: 0, label: "None" },
+              { value: 1, label: "First" },
+              { value: 2, label: "Second" },
+            ],
+          },
+        ],
+        submit: "Apply",
+        apply: (v) =>
+          commit((s) => {
+            const m = s.measures[measureIndex];
+            m.repeatStart = v.start === "yes";
+            m.repeatEnd = v.end === "yes";
+            m.ending = Number(v.ending) || undefined;
+          }),
+      });
+      return;
+    }
     if (
       ["new", "open", "save", "saveAs", "midi", "print", "importXml"].includes(
         action,
@@ -1058,6 +1314,18 @@ export function App() {
     if (action === "zoomIn") return zoomTo(zoom * 1.2);
     if (action === "zoomOut") return zoomTo(zoom / 1.2);
     if (action === "zoom100") return zoomTo(1);
+    if (action === "zoomOther") {
+      openNumberDialog(
+        "Zoom",
+        "Percentage",
+        Math.round(zoom * 100),
+        (n) => {
+          zoomTo(n / 100);
+        },
+        1000,
+      );
+      return;
+    }
     if (action === "fitWidth") {
       setFitPage(false);
       setFitWidth(true);
@@ -1088,6 +1356,11 @@ export function App() {
     if (
       [
         "select",
+        "staff",
+        "measure",
+        "key",
+        "time",
+        "clef",
         "write",
         "speedy",
         "hand",
@@ -1101,6 +1374,8 @@ export function App() {
       ].includes(action)
     ) {
       setMode(action as typeof mode);
+      if (action === "speedy") setSpeedyActive(true);
+      if (action === "staff") setShowInstruments(true);
       setRegion(undefined);
       if (action === "expression" || action === "articulation") {
         setShowInspector(true);
@@ -1166,7 +1441,7 @@ export function App() {
       }
       return;
     }
-    if (nearby && mode === "write" && !e.ctrlKey && !e.metaKey) {
+    if (nearby && mode === "write" && !e.ctrlKey && !e.metaKey && !entryRest) {
       const existing = score.notes.find((n) => n.id === nearby.id)!;
       const pitch = {
         ...hit.pitch,
@@ -1233,7 +1508,10 @@ export function App() {
           score.measures[hit.measure.measureIndex].key,
         ),
       };
-      insert([pitch], at);
+      insert(
+        entryRest ? [] : [{ ...pitch, alter: entryAccidental ?? pitch.alter }],
+        at,
+      );
     }
   };
 
@@ -1245,6 +1523,14 @@ export function App() {
     if (held.current || latchedRef.current) return;
     const hit = pointer(e),
       element = scrollHost.current!;
+    if (e.button === 2 && e.shiftKey) {
+      zoomTo(e.ctrlKey || e.metaKey ? zoom / 1.25 : zoom * 1.25, {
+        x: e.clientX,
+        y: e.clientY,
+      });
+      suppressContext.current = true;
+      return;
+    }
     if (e.button === 1 || e.button === 2 || mode === "hand") {
       gesture.current = {
         kind: "pan",
@@ -1326,7 +1612,12 @@ export function App() {
       e.currentTarget.setPointerCapture?.(e.pointerId);
       return;
     }
-    if (mode === "select" && !e.ctrlKey && !e.metaKey) {
+    if (mode === "speedy") setSpeedyActive(true);
+    if (
+      ["select", "staff", "measure", "key", "time", "clef"].includes(mode) &&
+      !e.ctrlKey &&
+      !e.metaKey
+    ) {
       const inside =
         region &&
         region.staffIds.includes(hit.staffId) &&
@@ -1537,6 +1828,23 @@ export function App() {
     if (held.current || latchedRef.current) return;
     const hit = pointer(e);
     if (!hit) return;
+    if (mode === "key" || mode === "time") {
+      command("measureSettings");
+      return;
+    }
+    if (mode === "measure") {
+      command("measureProperties");
+      return;
+    }
+    if (mode === "clef") {
+      command("clefSettings");
+      return;
+    }
+    if (mode === "staff") {
+      setShowInspector(true);
+      setPanel("score");
+      return;
+    }
     if (mode === "select") {
       const r =
         region ??
@@ -1573,6 +1881,9 @@ export function App() {
     audio.onEnd = () => {
       held.current = false;
       latchedRef.current = false;
+      pauseOffset.current = undefined;
+      setPaused(false);
+      setElapsed(0);
       setPlaying(false);
       setPlayhead(undefined);
       setLatched(false);
@@ -1747,6 +2058,12 @@ export function App() {
     zoom,
     showInspector,
     showInstruments,
+    mode,
+    playing,
+    paused,
+    entryDuration,
+    entryPitch,
+    palettes,
     dialog,
     help,
   ]);
@@ -1772,6 +2089,9 @@ export function App() {
         if (e.repeat || held.current || help) return;
         lastAudition.current = undefined;
         held.current = true;
+        pauseOffset.current = undefined;
+        setPaused(false);
+        setElapsed(0);
         playRequest.current++;
         controlGesture.current = e.ctrlKey;
         shift.current = e.shiftKey;
@@ -1876,11 +2196,11 @@ export function App() {
         (mode === "write" || mode === "speedy")
       ) {
         e.preventDefault();
+        const group = { actual: Number(digit), normal: digit === "3" ? 2 : 4 };
+        pendingTuplet.current = mode === "speedy" ? { ...group } : undefined;
         setEntryDuration((d) => ({
           ...d,
-          tuplets: d.tuplets.length
-            ? []
-            : [{ actual: Number(digit), normal: digit === "3" ? 2 : 4 }],
+          tuplets: mode === "speedy" || !d.tuplets.length ? [group] : [],
         }));
         return;
       }
@@ -1892,10 +2212,94 @@ export function App() {
         mode === "speedy"
       ) {
         e.preventDefault();
-        insert([], cursor, { ...entryDuration, base: durationKeys[digit] });
+        insert([], cursor, {
+          ...entryDuration,
+          base: durationKeys[digit],
+          dots: 0,
+        });
         return;
       }
+      if (
+        ((mode === "speedy" && e.shiftKey) ||
+          (mode === "write" && (e.ctrlKey || e.metaKey))) &&
+        ["ArrowUp", "ArrowDown"].includes(e.code)
+      ) {
+        e.preventDefault();
+        const si = Math.max(
+          0,
+          Math.min(
+            score.staves.length - 1,
+            score.staves.indexOf(staff) + (e.code === "ArrowDown" ? 1 : -1),
+          ),
+        );
+        setCursor({ ...cursor, staffId: score.staves[si].id });
+        setSelected(undefined);
+        return;
+      }
+      if (
+        mode === "speedy" &&
+        (e.ctrlKey || e.metaKey) &&
+        ["ArrowLeft", "ArrowRight"].includes(e.code)
+      ) {
+        e.preventDefault();
+        const entries = score.notes
+          .filter(
+            (n) =>
+              n.staffId === cursor.staffId &&
+              n.measureId === cursor.measureId &&
+              n.voice === cursor.voice,
+          )
+          .sort((a, b) => compare(a.offset, b.offset));
+        const n = e.code === "ArrowLeft" ? entries[0] : entries.at(-1);
+        setCursor({
+          ...cursor,
+          offset: n
+            ? e.code === "ArrowLeft"
+              ? n.offset
+              : add(n.offset, beats(n.duration))
+            : ZERO,
+        });
+        setSelected(e.code === "ArrowLeft" ? n?.id : undefined);
+        return;
+      }
+      if (
+        mode === "speedy" &&
+        e.shiftKey &&
+        ["ArrowLeft", "ArrowRight"].includes(e.code)
+      ) {
+        e.preventDefault();
+        const mi = Math.max(
+          0,
+          Math.min(
+            score.measures.length - 1,
+            measureIndex + (e.code === "ArrowRight" ? 1 : -1),
+          ),
+        );
+        setCursor({
+          ...cursor,
+          measureId: score.measures[mi].id,
+          offset: ZERO,
+        });
+        setSelected(undefined);
+        revealMeasure(mi);
+        return;
+      }
+      if (mode === "speedy" && !speedyActive && digit !== "0") return;
       if (e.ctrlKey || e.metaKey) {
+        if (["PageUp", "PageDown"].includes(e.code)) {
+          e.preventDefault();
+          if (viewOptions.view === "page")
+            goPage(visiblePage + (e.code === "PageDown" ? 1 : -1));
+          else if (scrollHost.current)
+            scrollHost.current.scrollLeft +=
+              scrollHost.current.clientWidth * (e.code === "PageDown" ? 1 : -1);
+          return;
+        }
+        if (e.code === "KeyT" && mode === "speedy") {
+          e.preventDefault();
+          command("tiePrevious");
+          return;
+        }
         const actions: Record<string, string> = {
           KeyZ: e.shiftKey ? "redo" : "undo",
           KeyY: "redo",
@@ -1908,7 +2312,7 @@ export function App() {
           KeyX: "cut",
           KeyV: e.altKey ? "repeat" : "paste",
           KeyI: "pasteInsert",
-          KeyA: "selectAll",
+          KeyA: e.shiftKey ? "select" : "selectAll",
           KeyG: "goTo",
           KeyM: "fitMeasures",
           Equal: "zoomIn",
@@ -1918,6 +2322,7 @@ export function App() {
           BracketRight: "fitWidth",
           BracketLeft: "fitPage",
           Digit1: "zoom100",
+          Digit0: "zoomOther",
         };
         if (actions[e.code]) {
           e.preventDefault();
@@ -1935,7 +2340,12 @@ export function App() {
       }
       if (e.code === "Enter") {
         e.preventDefault();
-        if (mode === "write") insert([entryPitch]);
+        if (mode === "write")
+          insert(
+            e.shiftKey || e.altKey || entryRest
+              ? []
+              : [{ ...entryPitch, alter: entryAccidental ?? entryPitch.alter }],
+          );
         else if (mode === "speedy") {
           const n = score.notes.find(
             (n) =>
@@ -1964,9 +2374,54 @@ export function App() {
       }
       if (e.code === "Delete" || e.code === "Backspace") {
         e.preventDefault();
+        if (mode === "speedy") {
+          const current = score.notes.find(
+            (n) =>
+              n.staffId === cursor.staffId &&
+              n.measureId === cursor.measureId &&
+              n.voice === cursor.voice &&
+              compare(n.offset, cursor.offset) === 0,
+          );
+          if (e.code === "Delete") {
+            if (current) {
+              commit((s) => {
+                s.notes = s.notes.filter((n) => n.id !== current.id);
+                cleanLinks(s);
+              });
+              setSelected(undefined);
+            }
+            return;
+          }
+          if (current?.pitches.length)
+            commit((s) => {
+              const n = s.notes.find((n) => n.id === current.id)!;
+              const at = n.pitches.findIndex(
+                (p) =>
+                  p.step === entryPitch.step && p.octave === entryPitch.octave,
+              );
+              if (at >= 0) {
+                n.pitches.splice(at, 1);
+                cleanLinks(s);
+              }
+            });
+          return;
+        }
         if (region && e.code === "Delete" && isStack(score, region))
           command("deleteMeasures");
         else remove();
+        return;
+      }
+      if (
+        ["PageUp", "PageDown", "Home", "End"].includes(e.code) &&
+        scrollHost.current
+      ) {
+        e.preventDefault();
+        const el = scrollHost.current;
+        if (e.code === "PageUp" || e.code === "PageDown")
+          el.scrollTop += el.clientHeight * (e.code === "PageDown" ? 1 : -1);
+        else if (viewOptions.view === "scroll")
+          revealMeasure(e.code === "Home" ? 0 : score.measures.length - 1);
+        else el.scrollLeft += el.clientWidth * (e.code === "End" ? 1 : -1);
         return;
       }
       if (e.code === "KeyN") {
@@ -1985,10 +2440,7 @@ export function App() {
       }
       if (e.code === "KeyT") {
         e.preventDefault();
-        if (note)
-          commit((s) =>
-            connectNext(s, note.id, e.shiftKey ? "slurTo" : "tieTo"),
-          );
+        command(e.shiftKey ? "tiePrevious" : "tie");
         return;
       }
       if (e.code === "Period") {
@@ -2015,6 +2467,18 @@ export function App() {
             })
           ) {
             setEntryDuration(dotted);
+            if (
+              mode === "speedy" &&
+              pendingTuplet.current?.remaining !== undefined &&
+              note.duration.tuplets.length
+            ) {
+              pendingTuplet.current.remaining -=
+                value(beats(dotted)) - value(beats(note.duration));
+              if (pendingTuplet.current.remaining < 1e-8) {
+                pendingTuplet.current = undefined;
+                setEntryDuration({ ...dotted, tuplets: [] });
+              }
+            }
             setCursor(
               nextCursor(
                 score,
@@ -2041,6 +2505,10 @@ export function App() {
       }
       if (digit === "0") {
         e.preventDefault();
+        if (mode === "speedy") {
+          setSpeedyActive(!speedyActive);
+          return;
+        }
         insert([]);
         return;
       }
@@ -2058,7 +2526,11 @@ export function App() {
       }
       if (digit && durationKeys[digit]) {
         e.preventDefault();
-        const d = { ...entryDuration, base: durationKeys[digit] };
+        const d = {
+          ...entryDuration,
+          base: durationKeys[digit],
+          dots: mode === "speedy" ? 0 : entryDuration.dots,
+        };
         if (e.altKey && note) {
           commit((s) => {
             const created = enterNote(
@@ -2247,7 +2719,11 @@ export function App() {
           alter: keyAlter(step, measure.key),
         };
         setEntryPitch(pitch);
-        insert([pitch]);
+        insert(
+          entryRest
+            ? []
+            : [{ ...pitch, alter: entryAccidental ?? pitch.alter }],
+        );
       }
     };
     const up = (e: KeyboardEvent) => {
@@ -2295,6 +2771,12 @@ export function App() {
     cursor,
     selected,
     entryDuration,
+    visiblePage,
+    entryRest,
+    entryAccidental,
+    speedyActive,
+    paused,
+    palettes,
     scope,
     pedal,
     layout,
@@ -2335,13 +2817,43 @@ export function App() {
           (m) =>
             activePosition >= m.start && activePosition < m.start + m.length,
         );
+  const goPage = (number: number) => {
+    const page = layout?.pages?.[number - 1],
+      scroller = scrollHost.current;
+    if (!page || !scroller) return;
+    scroller.scrollLeft = page.x * zoom;
+    scroller.scrollTop = page.y * zoom;
+    setVisiblePage(number);
+  };
   const currentMarks = score.marks.filter(
     (m) => m.measureId === measure.id && (!m.staffId || m.staffId === staff.id),
   );
   return (
     <div className="app">
       <header className="app-header">
-        <MenuBar command={command} />
+        <MenuBar
+          command={command}
+          mode={mode}
+          checked={{
+            ...palettes,
+            [mode]: true,
+            page: viewOptions.view === "page",
+            scroll: viewOptions.view === "scroll",
+            horizontal: viewOptions.arrangement === "horizontal",
+            vertical: viewOptions.arrangement === "vertical",
+            concert,
+            instruments: showInstruments,
+            inspector: showInspector,
+            speedyFrame: speedyActive,
+          }}
+          disabled={{
+            undo: !undo.current.length,
+            redo: !redo.current.length,
+            paste: !clipboard.current,
+            pasteInsert: !clipboard.current,
+            pause: !playing && !paused,
+          }}
+        />
         <button
           className="document-name"
           onClick={() => command("document")}
@@ -2356,163 +2868,77 @@ export function App() {
         </button>
         <div className="brand">Unicaria</div>
       </header>
-      <div className="transport">
-        <div className="transport-buttons">
-          <button
-            title="Open score (Ctrl+O)"
-            aria-label="Open score"
-            onClick={() => command("open")}
-          >
-            ▱
-          </button>
-          <button
-            title="Save (Ctrl+S)"
-            aria-label="Save score"
-            onClick={() => command("save")}
-          >
-            ▣
-          </button>
-          <span className="tool-divider" />
-          <button
-            className="icon"
-            disabled={!undo.current.length}
-            title="Undo (Ctrl+Z)"
-            onClick={() => history(true)}
-          >
-            ↶
-          </button>
-          <button
-            className="icon"
-            disabled={!redo.current.length}
-            title="Redo (Ctrl+Y)"
-            onClick={() => history(false)}
-          >
-            ↷
-          </button>
-          <span className="tool-divider" />
-          <button
-            className="icon"
-            title="Play from beginning"
-            onClick={() => void play(true)}
-          >
-            ↤
-          </button>
-          <button
-            className={"play " + (playing ? "active" : "")}
-            aria-label={playing ? "Stop playback" : "Play score"}
-            onClick={() => void play()}
-          >
-            {playing ? "■" : "▶"}
-          </button>
-          <button
-            className="icon"
-            title="Stop all sound (Escape)"
-            onClick={stop}
-          >
-            ■
-          </button>
-          <div className="tempo">
-            <span>♩ =</span>
-            <input
-              aria-label="Tempo"
-              type="number"
-              min="20"
-              max="400"
-              value={score.tempo}
-              onChange={(e) =>
-                commit((s) => {
-                  s.tempo = Number(e.target.value);
-                })
+      {palettes.mainPalette && (
+        <MainPalette
+          mode={mode}
+          command={command}
+          articulation={articulationValue}
+          setArticulation={(a) => setArticulationValue(a as Articulation)}
+        />
+      )}
+      {palettes.playbackControls && (
+        <PlaybackControls
+          playing={playing}
+          paused={paused}
+          counter={counterAt(
+            score,
+            playhead ?? value(absolute(index.starts, cursor)),
+          )}
+          elapsed={elapsed}
+          tempo={score.tempo}
+          command={command}
+          seek={seekCounter}
+          setTempo={(n) =>
+            commit((s) => {
+              s.tempo = n;
+            })
+          }
+          audioState={audio.state}
+          master={master}
+          setMaster={(n) => {
+            setMaster(n);
+            audio.volume(n);
+          }}
+          instruments={showInstruments}
+          inspector={showInspector}
+        />
+      )}
+      <div className="workspace">
+        {(palettes.notePalette || palettes.restPalette) && (
+          <EntryPalette
+            mode={mode}
+            duration={entryDuration}
+            rest={entryRest}
+            accidental={entryAccidental}
+            showNotes={palettes.notePalette}
+            showRests={palettes.restPalette}
+            command={command}
+            choose={(base, rest, reset) => {
+              setEntryDuration((d) => ({
+                ...d,
+                base,
+                ...(reset ? { dots: 0, tuplets: [] } : {}),
+              }));
+              setEntryRest(rest);
+              if (reset) setEntryAccidental(undefined);
+              pendingTuplet.current = undefined;
+              setMode("write");
+            }}
+            modify={(kind, n) => {
+              if (kind === "dot")
+                setEntryDuration((d) => ({ ...d, dots: (d.dots + 1) % 3 }));
+              if (kind === "accidental")
+                setEntryAccidental(entryAccidental === n ? undefined : n);
+              if (kind === "tuplet") {
+                pendingTuplet.current = undefined;
+                setEntryDuration((d) => ({
+                  ...d,
+                  tuplets: d.tuplets.length ? [] : [{ actual: 3, normal: 2 }],
+                }));
               }
-            />
-          </div>
-        </div>
-        <div className="view-controls">
-          <select
-            aria-label="Score view"
-            value={viewOptions.view}
-            onChange={(e) => command(e.target.value)}
-          >
-            <option value="page">Page view</option>
-            <option value="scroll">Scroll view</option>
-          </select>
-          <button title="Fit page (Ctrl+[)" onClick={() => command("fitPage")}>
-            Fit page
-          </button>
-          <button
-            title="Fit width (Ctrl+])"
-            onClick={() => command("fitWidth")}
-          >
-            Fit width
-          </button>
-        </div>
-        <div className="sound-controls">
-          <button
-            className={"audio-state " + audio.state}
-            onClick={() => void enable()}
-          >
-            <i />
-            {audio.state === "ready"
-              ? "Sound on"
-              : audio.state === "loading"
-                ? "Loading sounds…"
-                : "Enable sound"}
-          </button>
-          <input
-            aria-label="Master volume"
-            type="range"
-            min="0"
-            max="1"
-            step=".01"
-            value={master}
-            onChange={(e) => {
-              setMaster(Number(e.target.value));
-              audio.volume(Number(e.target.value));
             }}
           />
-          <button
-            className={showInstruments ? "selected" : ""}
-            onClick={() => command("instruments")}
-          >
-            Instruments
-          </button>
-          <button
-            className={showInspector ? "selected" : ""}
-            onClick={() => command("inspector")}
-          >
-            Inspector
-          </button>
-        </div>
-      </div>
-      <div className="workspace">
-        <div className="tool-palette" aria-label="Notation tools">
-          {(
-            [
-              ["select", "↖", "Selection (Esc)"],
-              ["write", "♪", "Simple Entry (N)"],
-              ["speedy", "♬", "Speedy Entry"],
-              ["erase", "⌫", "Eraser"],
-              ["articulation", "•", "Articulation"],
-              ["expression", "mf", "Expression"],
-              ["crescendo", "<", "Crescendo"],
-              ["diminuendo", ">", "Diminuendo"],
-              ["slur", "⌢", "Slur"],
-              ["hand", "✋", "Hand"],
-              ["zoom", "⌕", "Zoom"],
-            ] as const
-          ).map(([tool, icon, title]) => (
-            <button
-              key={tool}
-              aria-label={title}
-              title={title}
-              aria-pressed={mode === tool}
-              className={mode === tool ? "selected" : ""}
-              onClick={() => command(tool)}
-            >
-              {icon}
-            </button>
-          ))}
-        </div>
+        )}
         {showInstruments && (
           <InstrumentPanel
             {...{
@@ -2530,140 +2956,6 @@ export function App() {
           />
         )}
         <main className="editor">
-          <div className="notation-toolbar">
-            <div className="segmented">
-              <button
-                className={mode === "select" ? "selected" : ""}
-                title="Select measures and regions (Esc)"
-                onClick={() => setMode("select")}
-              >
-                ↖ Select
-              </button>
-              <button
-                className={mode === "write" ? "selected" : ""}
-                title="Write notes (N)"
-                onClick={() => setMode("write")}
-              >
-                ♪ Simple
-              </button>
-              <button
-                className={mode === "speedy" ? "selected" : ""}
-                title="Pitch first, then duration"
-                onClick={() => command("speedy")}
-              >
-                ♬ Speedy
-              </button>
-            </div>
-            <div className="duration-buttons">
-              {[
-                [1, "𝅝"],
-                [2, "𝅗𝅥"],
-                [4, "♩"],
-                [8, "♪"],
-                [16, "♬"],
-                [32, "32"],
-              ].map(([base, symbol]) => (
-                <button
-                  key={base}
-                  className={entryDuration.base === base ? "selected" : ""}
-                  aria-label={`Duration ${base}`}
-                  title={`1/${base} note`}
-                  onClick={() =>
-                    setEntryDuration((d) => ({ ...d, base: Number(base) }))
-                  }
-                >
-                  {symbol}
-                </button>
-              ))}
-            </div>
-            <button
-              className={entryDuration.dots ? "selected" : ""}
-              title="Dotted duration (.)"
-              onClick={() =>
-                setEntryDuration((d) => ({ ...d, dots: (d.dots + 1) % 3 }))
-              }
-            >
-              {entryDuration.dots === 2 ? "··" : "·"}
-            </button>
-            <select
-              aria-label="Tuplet"
-              value={entryDuration.tuplets[0]?.actual ?? 0}
-              onChange={(e) =>
-                setEntryDuration((d) => ({
-                  ...d,
-                  tuplets: Number(e.target.value)
-                    ? [
-                        {
-                          actual: Number(e.target.value),
-                          normal: Number(e.target.value) === 3 ? 2 : 4,
-                        },
-                      ]
-                    : [],
-                }))
-              }
-            >
-              <option value="0">Straight</option>
-              <option value="3">Triplet 3:2</option>
-              <option value="5">Quintuplet 5:4</option>
-              <option value="7">Septuplet 7:4</option>
-            </select>
-            <button title="Insert rest (R)" onClick={() => insert([])}>
-              Rest
-            </button>
-            <select
-              aria-label="Layer"
-              value={cursor.voice}
-              onChange={(e) => {
-                setCursor({ ...cursor, voice: Number(e.target.value) });
-                setSelected(undefined);
-              }}
-            >
-              {[0, 1, 2, 3].map((v) => (
-                <option key={v} value={v}>
-                  Layer {v + 1}
-                </option>
-              ))}
-            </select>
-            <div className="toolbar-end">
-              {mode === "articulation" && (
-                <select
-                  aria-label="Articulation tool"
-                  value={articulationValue}
-                  onChange={(e) =>
-                    setArticulationValue(e.target.value as Articulation)
-                  }
-                >
-                  {[
-                    "staccato",
-                    "tenuto",
-                    "accent",
-                    "marcato",
-                    "fermata",
-                    "trill",
-                    "tremolo",
-                  ].map((a) => (
-                    <option key={a}>{a}</option>
-                  ))}
-                </select>
-              )}
-              <button
-                className="icon"
-                disabled={!undo.current.length}
-                title="Undo"
-                onClick={() => history(true)}
-              >
-                ↶
-              </button>
-              <button
-                className="icon"
-                disabled={!redo.current.length}
-                title="Redo"
-                onClick={() => history(false)}
-              >
-                ↷
-              </button>
-            </div>
-          </div>
           {recovery && (
             <div className="recovery-banner">
               Recovery available: <strong>{recovery.title}</strong>
@@ -2686,6 +2978,34 @@ export function App() {
             className="score-scroll"
             tabIndex={0}
             aria-label="Score editor"
+            onScroll={(e) => {
+              const horizontal = viewOptions.arrangement === "horizontal";
+              const position =
+                (horizontal
+                  ? e.currentTarget.scrollLeft
+                  : e.currentTarget.scrollTop) / zoom;
+              const pages = layout?.pages ?? [];
+              const extent =
+                (horizontal
+                  ? e.currentTarget.clientWidth
+                  : e.currentTarget.clientHeight) / zoom;
+              let page = pages[0],
+                best = -1;
+              for (const p of pages) {
+                const start = horizontal ? p.x : p.y,
+                  size = horizontal ? p.width : p.height;
+                const visible = Math.max(
+                  0,
+                  Math.min(position + extent, start + size) -
+                    Math.max(position, start),
+                );
+                if (visible > best + 0.01) {
+                  best = visible;
+                  page = p;
+                }
+              }
+              setVisiblePage(page?.number ?? 1);
+            }}
           >
             <div
               className="paper-space"
@@ -2762,41 +3082,54 @@ export function App() {
                 {dragRect && (
                   <div className="zoom-rectangle" style={dragRect} />
                 )}
-                {mode === "speedy" && cursorBox && cursorStaff && (
-                  <div
-                    className="speedy-frame"
-                    style={{
-                      left: cursorBox.x - 3,
-                      top: cursorStaff.lineBottom - 80,
-                      width: cursorBox.endX - cursorBox.x + 6,
-                      height: 112,
-                    }}
-                  >
-                    <span>
-                      Layer {cursor.voice + 1} · {pitchName(entryPitch)}
-                    </span>
-                    <i
+                {mode === "speedy" &&
+                  speedyActive &&
+                  cursorBox &&
+                  cursorStaff && (
+                    <div
+                      className="speedy-frame"
                       style={{
-                        left:
-                          xAtTime(cursorBox, value(cursor.offset)) -
-                          cursorBox.x +
-                          3,
-                        top:
-                          80 -
-                          (entryPitch.octave * 7 +
-                            steps.indexOf(entryPitch.step) -
-                            (staff.clef === "bass" ? 18 : 30)) *
-                            5,
+                        left: cursorBox.x - 3,
+                        top: cursorStaff.lineBottom - 80,
+                        width: cursorBox.endX - cursorBox.x + 6,
+                        height: 112,
                       }}
-                    />
-                  </div>
-                )}
+                    >
+                      <span>V{cursor.voice + 1}</span>
+                      <b className="speedy-tuplet">
+                        {entryDuration.tuplets[0]?.actual ?? ""}
+                      </b>
+                      <div
+                        className="speedy-insertion"
+                        style={{
+                          left:
+                            xAtTime(cursorBox, value(cursor.offset)) -
+                            cursorBox.x +
+                            3,
+                        }}
+                      />
+                      <i
+                        style={{
+                          left:
+                            xAtTime(cursorBox, value(cursor.offset)) -
+                            cursorBox.x +
+                            3,
+                          top:
+                            80 -
+                            (entryPitch.octave * 7 +
+                              steps.indexOf(entryPitch.step) -
+                              (staff.clef === "bass" ? 18 : 30)) *
+                              5,
+                        }}
+                      />
+                    </div>
+                  )}
                 {cursorBox &&
                   cursorStaff &&
                   !auditioning &&
                   !playing &&
                   !region &&
-                  ["write", "speedy"].includes(mode) && (
+                  mode === "write" && (
                     <div
                       className="edit-caret"
                       style={{
@@ -2828,6 +3161,38 @@ export function App() {
             </div>
           </div>
           <div className="editor-bottom">
+            <div className="page-navigation">
+              <button
+                aria-label="Previous page"
+                disabled={visiblePage <= 1 || viewOptions.view !== "page"}
+                onClick={() => goPage(visiblePage - 1)}
+              >
+                <ScoreIcon name="previous" />
+              </button>
+              <label>
+                Page{" "}
+                <input
+                  aria-label="Page number"
+                  type="number"
+                  min="1"
+                  max={layout?.pages?.length ?? 1}
+                  value={visiblePage}
+                  disabled={viewOptions.view !== "page"}
+                  onChange={(e) => goPage(Number(e.target.value))}
+                />
+              </label>
+              <span>of {layout?.pages?.length ?? 1}</span>
+              <button
+                aria-label="Next page"
+                disabled={
+                  visiblePage >= (layout?.pages?.length ?? 1) ||
+                  viewOptions.view !== "page"
+                }
+                onClick={() => goPage(visiblePage + 1)}
+              >
+                <ScoreIcon name="next" />
+              </button>
+            </div>
             <div className="layer-buttons" aria-label="Layers">
               {[0, 1, 2, 3].map((v) => (
                 <button
@@ -2854,6 +3219,26 @@ export function App() {
                   staff.name}
             </button>
             <div className="zoom-controls">
+              <select
+                aria-label="Score view"
+                value={viewOptions.view}
+                onChange={(e) => command(e.target.value)}
+              >
+                <option value="page">Page view</option>
+                <option value="scroll">Scroll view</option>
+              </select>
+              <button
+                title="Fit page (Ctrl+[)"
+                onClick={() => command("fitPage")}
+              >
+                Fit page
+              </button>
+              <button
+                title="Fit width (Ctrl+])"
+                onClick={() => command("fitWidth")}
+              >
+                Fit width
+              </button>
               <button onClick={() => setConcert(!concert)}>
                 {concert ? "Concert pitch" : "Written pitch"}
               </button>

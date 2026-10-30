@@ -233,6 +233,9 @@ export function spellDuration(
   preferred?: Duration,
 ): Duration[] {
   if (span.n === 0) return [];
+  // Equal timing does not imply equal notation (a dotted triplet, for example).
+  if (preferred && compare(beats(preferred), span) === 0)
+    return [structuredClone(preferred)];
   const candidates: Duration[] = [];
   for (const tuplets of [
     [],

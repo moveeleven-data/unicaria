@@ -1,6 +1,6 @@
 {
   "name": "unicaria",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "A local notation workspace with vertical harmonic audition",
   "type": "module",

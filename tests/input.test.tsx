@@ -31,8 +31,14 @@ vi.mock("../src/audio/controller", () => ({
     });
     audition = vi.fn();
     sweep = vi.fn();
-    stop = vi.fn();
-    play = vi.fn();
+    playStart = 0;
+    stop = vi.fn(() => {
+      this.playing = false;
+    });
+    play = vi.fn((_performance, offset = 0) => {
+      this.playing = true;
+      this.playStart = this.context.currentTime - offset;
+    });
     volume = vi.fn();
     dispose = vi.fn();
     constructor() {
@@ -186,7 +192,7 @@ describe("familiar score editing gestures", () => {
     ).toContain("selected");
   });
   it("Speedy Entry chooses pitch before entering a duration", () => {
-    fireEvent.click(screen.getByRole("button", { name: "♬ Speedy" }));
+    fireEvent.click(screen.getByRole("button", { name: "Speedy Entry" }));
     click();
     const before = audio.score.notes.length;
     keyDown("ArrowUp");
@@ -194,6 +200,240 @@ describe("familiar score editing gestures", () => {
     keyDown("Digit5");
     expect(document.querySelector(".speedy-frame")).toBeTruthy();
     expect(screen.getByText(/Entered/)).toBeTruthy();
+  });
+
+  it("Speedy 0 exits and reopens the frame without adding a rest", () => {
+    fireEvent.click(screen.getByRole("button", { name: "Speedy Entry" }));
+    const before = JSON.stringify(audio.score);
+    keyDown("Digit0");
+    expect(document.querySelector(".speedy-frame")).toBeNull();
+    keyDown("Digit5");
+    expect(JSON.stringify(audio.score)).toBe(before);
+    keyDown("Digit0");
+    expect(document.querySelector(".speedy-frame")).toBeTruthy();
+  });
+  it("Speedy Shift+Down changes staff instead of raising or lowering a pitch", () => {
+    fireEvent.click(screen.getByRole("button", { name: "Speedy Entry" }));
+    keyDown("ArrowDown", { shiftKey: true });
+    expect(
+      screen.getByRole("button", { name: /Measure 1 · Beat 1 · Piano/ }),
+    ).toBeTruthy();
+    keyDown("ArrowUp", { shiftKey: true });
+    expect(
+      screen.getByRole("button", { name: /Measure 1 · Beat 1 · Flute/ }),
+    ).toBeTruthy();
+  });
+  it("Speedy Backspace removes only the pitch under the crossbar, preserving the chord duration", () => {
+    fireEvent.click(screen.getByRole("button", { name: "Speedy Entry" }));
+    keyDown("ArrowDown", { shiftKey: true });
+    keyDown("ArrowLeft", { ctrlKey: true });
+    const first = audio.score.notes.find(
+      (n: any) => n.staffId === audio.score.staves[1].id && n.offset.n === 0,
+    );
+    const count = first.pitches.length,
+      noteCount = audio.score.notes.length;
+    // Moving left to a selected entry sets the crossbar to its first chord tone.
+    keyDown("ArrowRight");
+    keyDown("ArrowLeft");
+    keyDown("Backspace");
+    const after = audio.score.notes.find((n: any) => n.id === first.id);
+    expect(after.pitches).toHaveLength(count - 1);
+    expect(after.duration).toEqual(first.duration);
+    expect(audio.score.notes).toHaveLength(noteCount);
+    keyDown("KeyZ", { ctrlKey: true });
+    expect(
+      audio.score.notes.find((n: any) => n.id === first.id).pitches,
+    ).toHaveLength(count);
+  });
+  it("Speedy Ctrl+3 ends after one complete triplet group, including rests", () => {
+    fireEvent.click(screen.getByRole("button", { name: "Speedy Entry" }));
+    keyDown("Digit3", { ctrlKey: true });
+    keyDown("Digit4");
+    keyDown("Digit4", { ctrlKey: true, shiftKey: true });
+    keyDown("Digit4");
+    expect(
+      screen
+        .getByRole("button", { name: "Triplet" })
+        .getAttribute("aria-pressed"),
+    ).toBe("false");
+    keyDown("Digit4");
+    const staff = audio.score.staves[0].id;
+    const entered = audio.score.notes
+      .filter(
+        (n: any) =>
+          n.staffId === staff && n.measureId === audio.score.measures[0].id,
+      )
+      .sort(
+        (a: any, b: any) => a.offset.n / a.offset.d - b.offset.n / b.offset.d,
+      );
+    expect(entered.slice(0, 3).map((n: any) => n.duration.tuplets)).toEqual(
+      Array(3).fill([{ actual: 3, normal: 2 }]),
+    );
+    expect(entered[1].pitches).toHaveLength(0);
+    expect(entered[3].duration.tuplets).toEqual([]);
+    expect(entered[3].offset).toEqual({ n: 1, d: 1 });
+  });
+
+  it("Speedy dotted notes consume the right portion of a tuplet and do not dot the next number", () => {
+    fireEvent.click(screen.getByRole("button", { name: "Speedy Entry" }));
+    keyDown("Digit3", { ctrlKey: true });
+    keyDown("Digit4");
+    keyDown("Period");
+    keyDown("Digit4");
+    keyDown("Digit3");
+    expect(
+      screen
+        .getByRole("button", { name: "Triplet" })
+        .getAttribute("aria-pressed"),
+    ).toBe("false");
+    const entries = audio.score.notes
+      .filter(
+        (n: any) =>
+          n.staffId === audio.score.staves[0].id &&
+          n.measureId === audio.score.measures[0].id,
+      )
+      .sort(
+        (a: any, b: any) => a.offset.n / a.offset.d - b.offset.n / b.offset.d,
+      );
+    expect(entries[0].duration.dots).toBe(1);
+    expect(entries[1].duration.dots).toBe(0);
+    expect(entries[1].offset).toEqual({ n: 1, d: 2 });
+    expect(entries[2].offset).toEqual({ n: 5, d: 6 });
+  });
+  it("Speedy Delete acts at the insertion bar, not on the previously entered note", () => {
+    fireEvent.click(screen.getByRole("button", { name: "Speedy Entry" }));
+    keyDown("Digit5");
+    keyDown("Delete");
+    const notes = audio.score.notes.filter(
+      (n: any) =>
+        n.staffId === audio.score.staves[0].id &&
+        n.measureId === audio.score.measures[0].id,
+    );
+    expect(notes.some((n: any) => n.offset.n === 0)).toBe(true);
+    expect(notes.some((n: any) => n.offset.n / n.offset.d === 1)).toBe(false);
+  });
+  it("the rest palette enters rests at the clicked score position", () => {
+    fireEvent.click(screen.getByRole("button", { name: "Rest duration 8" }));
+    click(20, 10);
+    const n = audio.score.notes.find(
+      (n: any) =>
+        n.staffId === audio.score.staves[0].id &&
+        n.measureId === audio.score.measures[0].id &&
+        n.offset.n === 0,
+    );
+    expect(n.pitches).toEqual([]);
+    expect(n.duration.base).toBe(8);
+    expect(
+      screen
+        .getByRole("button", { name: "Rest duration 8" })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+  it("double-clicking a duration clears extra palette modifiers", () => {
+    fireEvent.click(screen.getByRole("button", { name: "Sharp" }));
+    fireEvent.click(screen.getByRole("button", { name: "Triplet" }));
+    fireEvent.doubleClick(screen.getByRole("button", { name: "Duration 4" }));
+    expect(
+      screen
+        .getByRole("button", { name: "Sharp" })
+        .getAttribute("aria-pressed"),
+    ).toBe("false");
+    expect(
+      screen
+        .getByRole("button", { name: "Triplet" })
+        .getAttribute("aria-pressed"),
+    ).toBe("false");
+  });
+  it("the Measure tool supports shift selection and opens attributes on double-click", () => {
+    fireEvent.click(screen.getByRole("button", { name: "Measure" }));
+    click();
+    click(300, 180, { shiftKey: true });
+    expect(
+      screen.getByRole("button", { name: /Measure 1 · 3 staves · 4 beats/ }),
+    ).toBeTruthy();
+    fireEvent.doubleClick(document.querySelector(".paper")!, {
+      clientX: 200,
+      clientY: 10,
+    });
+    expect(
+      screen.getByRole("dialog", { name: "Measure attributes" }),
+    ).toBeTruthy();
+  });
+  it("Window can hide and restore each palette without changing the score", () => {
+    const before = JSON.stringify(audio.score);
+    for (const label of [
+      "Main Tool Palette",
+      "Playback Controls",
+      "Simple Entry Palette",
+      "Simple Entry Rests Palette",
+    ]) {
+      fireEvent.click(screen.getByRole("button", { name: "Window" }));
+      fireEvent.click(screen.getByRole("menuitem", { name: label }));
+      expect(screen.queryByRole("toolbar", { name: label })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Window" }));
+      fireEvent.click(screen.getByRole("menuitem", { name: label }));
+      expect(screen.getByRole("toolbar", { name: label })).toBeTruthy();
+    }
+    expect(JSON.stringify(audio.score)).toBe(before);
+  });
+  it("Pause resumes at the same elapsed performance position, and Stop resets the counter", async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Play score" }));
+    await waitFor(() => expect(engine().play).toHaveBeenCalled());
+    engine().context.currentTime = 2.75;
+    fireEvent.click(screen.getByRole("button", { name: "Pause playback" }));
+    expect(
+      screen
+        .getByRole("button", { name: "Pause playback" })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    engine().context.currentTime = 10;
+    fireEvent.click(screen.getByRole("button", { name: "Play score" }));
+    await waitFor(() => expect(engine().play).toHaveBeenCalledTimes(2));
+    expect(engine().play.mock.calls.at(-1)[1]).toBeCloseTo(2.75);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Stop all sound (Escape)" }),
+    );
+    expect(
+      (
+        screen.getByRole("textbox", {
+          name: "Playback position",
+        }) as HTMLInputElement
+      ).value,
+    ).toBe("1 | 1 | 0000");
+  });
+  it("edits invalidate the paused performance instead of resuming stale music", async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Play score" }));
+    await waitFor(() => expect(engine().play).toHaveBeenCalled());
+    engine().context.currentTime = 3;
+    fireEvent.click(screen.getByRole("button", { name: "Pause playback" }));
+    click();
+    keyDown("Backspace");
+    expect(
+      screen
+        .getByRole("button", { name: "Pause playback" })
+        .getAttribute("aria-pressed"),
+    ).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "Play score" }));
+    await waitFor(() => expect(engine().play).toHaveBeenCalledTimes(2));
+    expect(engine().play.mock.calls.at(-1)[1]).toBe(0);
+  });
+  it("playback position accepts beat/tick positions and rejects out-of-score values", () => {
+    const input = screen.getByRole("textbox", {
+      name: "Playback position",
+    }) as HTMLInputElement;
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "3 | 2 | 512" } });
+    fireEvent.blur(input);
+    expect(
+      screen.getByRole("button", { name: /Measure 3 · Beat 2.5/ }),
+    ).toBeTruthy();
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "9999" } });
+    fireEvent.blur(input);
+    expect(
+      screen.getByRole("button", { name: /Measure 3 · Beat 2.5/ }),
+    ).toBeTruthy();
+    expect(screen.getByText(/That measure is outside/)).toBeTruthy();
   });
   it("Ctrl+E changes view without exporting MIDI", () => {
     keyDown("KeyE", { ctrlKey: true });
@@ -381,11 +621,11 @@ describe("Space audition input lifecycle", () => {
   it("stops when focus moves to an editable field", async () => {
     await hold();
     engine().stop.mockClear();
-    fireEvent.focusIn(screen.getByRole("spinbutton"));
+    fireEvent.focusIn(screen.getByRole("spinbutton", { name: "Tempo" }));
     expect(engine().stop).toHaveBeenCalled();
   });
   it("does not consume Space typed into a text field", async () => {
-    const input = screen.getByRole("spinbutton");
+    const input = screen.getByRole("spinbutton", { name: "Tempo" });
     fireEvent.keyDown(input, { key: " ", code: "Space" });
     expect(engine().enable).not.toHaveBeenCalled();
     expect(engine().audition).not.toHaveBeenCalled();

@@ -316,6 +316,18 @@ app.whenReady().then(async () => {
         ],
       },
       {
+        label: "Utilities",
+        submenu: [
+          { label: "Transpose…", click: () => command("transpose") },
+          {
+            label: "Fit measures…",
+            accelerator: "CmdOrCtrl+M",
+            click: () => command("fitMeasures"),
+          },
+          { label: "Repeat selected music…", click: () => command("repeat") },
+        ],
+      },
+      {
         label: "View",
         submenu: [
           {
@@ -345,6 +357,57 @@ app.whenReady().then(async () => {
             click: () => command("help"),
           },
         ],
+      },
+      {
+        label: "Document",
+        submenu: [
+          { label: "Title and composer…", click: () => command("document") },
+          {
+            label: "Time and key signature…",
+            click: () => command("measureSettings"),
+          },
+          { label: "Page layout…", click: () => command("pageLayout") },
+        ],
+      },
+      {
+        label: "MIDI/Audio",
+        submenu: [
+          { label: "Play / stop", click: () => command("play") },
+          { label: "Pause", click: () => command("pause") },
+          { label: "All notes off", click: () => command("stop") },
+          {
+            label: "ScoreManager / mixer…",
+            click: () => command("instruments"),
+          },
+        ],
+      },
+      {
+        label: "Tools",
+        submenu: [
+          ["Selection", "select"],
+          ["Staff", "staff"],
+          ["Key Signature", "key"],
+          ["Time Signature", "time"],
+          ["Clef", "clef"],
+          ["Measure", "measure"],
+          ["Simple Entry", "write"],
+          ["Speedy Entry", "speedy"],
+          ["Articulation", "articulation"],
+          ["Expression", "expression"],
+          ["Slur", "slur"],
+          ["Hand", "hand"],
+          ["Zoom", "zoom"],
+        ].map(([label, action]) => ({ label, click: () => command(action) })),
+      },
+      {
+        label: "Window",
+        submenu: [
+          ["Main Tool Palette", "mainPalette"],
+          ["Playback Controls", "playbackControls"],
+          ["Simple Entry Palette", "notePalette"],
+          ["Simple Entry Rests Palette", "restPalette"],
+          ["Notation inspector", "inspector"],
+        ].map(([label, action]) => ({ label, click: () => command(action) })),
       },
     ]),
   );
