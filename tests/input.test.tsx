@@ -11,7 +11,10 @@ import {
 import { App } from "../src/ui/App";
 import type { DesiredVoice } from "../src/performance/compiler";
 
-const audio = vi.hoisted(() => ({ instances: [] as any[] }));
+const audio = vi.hoisted(() => ({
+  instances: [] as any[],
+  score: undefined as any,
+}));
 vi.mock("../src/audio/controller", () => ({
   AudioController: class {
     state = "off";
@@ -27,6 +30,7 @@ vi.mock("../src/audio/controller", () => ({
       this.state = "ready";
     });
     audition = vi.fn();
+    sweep = vi.fn();
     stop = vi.fn();
     play = vi.fn();
     volume = vi.fn();
@@ -44,35 +48,188 @@ vi.mock("../src/files/documents", () => ({
   saveMidi: vi.fn(),
 }));
 vi.mock("../src/engraving/render", () => ({
-  renderScore: (_host: unknown, score: any) => ({
-    width: 1120,
-    height: 800,
-    notes: [],
-    measures: [
-      {
-        measureId: score.measures[0].id,
-        measureIndex: 0,
-        start: 0,
-        length: 4,
-        x: 0,
-        endX: 1000,
-        top: 0,
-        bottom: 400,
-        anchors: [
-          { x: 0, time: 0 },
-          { x: 1000, time: 4 },
-        ],
-        staves: score.staves.map((s: any, i: number) => ({
-          id: s.id,
-          top: i * 100,
-          bottom: (i + 1) * 100,
-          lineBottom: i * 100 + 80,
-          clef: s.clef,
-        })),
-      },
-    ],
-  }),
+  renderScore: (_host: unknown, score: any) => (
+    (audio.score = score),
+    {
+      width: 1120,
+      height: 800,
+      notes: [],
+      measures: [
+        {
+          measureId: score.measures[0].id,
+          measureIndex: 0,
+          start: 0,
+          length: 4,
+          x: 0,
+          endX: 1000,
+          top: 0,
+          bottom: 400,
+          anchors: [
+            { x: 0, time: 0 },
+            { x: 1000, time: 4 },
+          ],
+          staves: score.staves.map((s: any, i: number) => ({
+            id: s.id,
+            top: i * 100,
+            bottom: (i + 1) * 100,
+            lineBottom: i * 100 + 80,
+            clef: s.clef,
+          })),
+        },
+      ],
+    }
+  ),
 }));
+
+describe("familiar score editing gestures", () => {
+  const down = (x = 200, y = 10, extra = {}) =>
+    fireEvent.pointerDown(document.querySelector(".paper")!, {
+      clientX: x,
+      clientY: y,
+      button: 0,
+      ...extra,
+    });
+  const up = (x = 200, y = 10, extra = {}) =>
+    fireEvent.pointerUp(document.querySelector(".paper")!, {
+      clientX: x,
+      clientY: y,
+      button: 0,
+      ...extra,
+    });
+  const click = (x = 200, y = 10, extra = {}) => {
+    down(x, y, extra);
+    up(x, y, extra);
+  };
+  const menu = (label: string) => {
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: new RegExp("^" + label) }),
+    );
+  };
+  it("starts with a score-first workspace and no prominent audition prompt", () => {
+    expect(screen.queryByRole("button", { name: "Audition" })).toBeNull();
+    expect(screen.queryByText("Selected note")).toBeNull();
+    expect(document.querySelector(".instruments")).toBeNull();
+    expect(document.querySelector(".inspector")).toBeNull();
+  });
+  it("click selects a full measure in one staff", () => {
+    click();
+    expect(document.querySelectorAll(".region-highlight")).toHaveLength(1);
+    expect(
+      screen.getByRole("button", { name: /Measure 1 · 1 staff · 4 beats/ }),
+    ).toBeTruthy();
+  });
+  it("shift-click extends a selection vertically", () => {
+    click();
+    click(300, 180, { shiftKey: true });
+    expect(
+      screen.getByRole("button", { name: /Measure 1 · 3 staves · 4 beats/ }),
+    ).toBeTruthy();
+  });
+  it("double-click selects the full measure stack", () => {
+    click();
+    fireEvent.doubleClick(document.querySelector(".paper")!, {
+      clientX: 200,
+      clientY: 10,
+    });
+    expect(screen.getByRole("button", { name: /3 staves/ })).toBeTruthy();
+  });
+  it("Backspace clears music but retains measures and undo restores it", () => {
+    const count = audio.score.notes.length;
+    click();
+    keyDown("Backspace");
+    expect(audio.score.measures).toHaveLength(8);
+    expect(audio.score.notes.length).toBeLessThan(count);
+    keyDown("KeyZ", { ctrlKey: true });
+    expect(audio.score.notes).toHaveLength(count);
+  });
+  it("Delete removes a stack and undo restores the measure and music", () => {
+    const count = audio.score.notes.length;
+    click();
+    fireEvent.doubleClick(document.querySelector(".paper")!, {
+      clientX: 200,
+      clientY: 10,
+    });
+    keyDown("Delete");
+    expect(audio.score.measures).toHaveLength(7);
+    keyDown("KeyZ", { ctrlKey: true });
+    expect(audio.score.measures).toHaveLength(8);
+    expect(audio.score.notes).toHaveLength(count);
+  });
+  it("Select All covers the entire document", () => {
+    keyDown("KeyA", { ctrlKey: true });
+    expect(screen.getByRole("button", { name: /Measures 1–8/ })).toBeTruthy();
+  });
+  it("adds multiple measures through a focused dialog", () => {
+    menu("Add measures");
+    fireEvent.change(screen.getByLabelText("Number to add at the end"), {
+      target: { value: "3" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(audio.score.measures).toHaveLength(11);
+  });
+  it("does not enter music when a command dialog is open", () => {
+    const count = audio.score.notes.length;
+    menu("Add measures");
+    keyDown("KeyC", { key: "c" });
+    keyDown("Delete");
+    expect(audio.score.notes).toHaveLength(count);
+  });
+  it("uses 5 for quarter notes and 4 for eighth notes in Simple Entry", () => {
+    keyDown("Digit5");
+    expect(
+      screen.getByRole("button", { name: "Duration 4" }).className,
+    ).toContain("selected");
+    keyDown("Digit4");
+    expect(
+      screen.getByRole("button", { name: "Duration 8" }).className,
+    ).toContain("selected");
+  });
+  it("Speedy Entry chooses pitch before entering a duration", () => {
+    fireEvent.click(screen.getByRole("button", { name: "♬ Speedy" }));
+    click();
+    const before = audio.score.notes.length;
+    keyDown("ArrowUp");
+    expect(audio.score.notes).toHaveLength(before);
+    keyDown("Digit5");
+    expect(document.querySelector(".speedy-frame")).toBeTruthy();
+    expect(screen.getByText(/Entered/)).toBeTruthy();
+  });
+  it("Ctrl+E changes view without exporting MIDI", () => {
+    keyDown("KeyE", { ctrlKey: true });
+    expect(
+      (
+        screen.getByRole("combobox", {
+          name: "Score view",
+        }) as HTMLSelectElement
+      ).value,
+    ).toBe("scroll");
+    keyDown("KeyE", { ctrlKey: true });
+    expect(
+      (
+        screen.getByRole("combobox", {
+          name: "Score view",
+        }) as HTMLSelectElement
+      ).value,
+    ).toBe("page");
+  });
+  it("a fast pointer sweep forwards every crossed slice to the audio queue", async () => {
+    await hold();
+    point(800, 10);
+    expect(engine().sweep).toHaveBeenCalled();
+    const frames = engine().sweep.mock.calls.at(-1)[0];
+    expect(frames.length).toBeGreaterThan(1);
+    keyUp("Space");
+    expect(engine().stop).toHaveBeenCalled();
+  });
+  it("can audition the same position again after Space is released", async () => {
+    await hold();
+    keyUp("Space");
+    engine().audition.mockClear();
+    await hold();
+    expect(lastVoices()).toHaveLength(5);
+  });
+});
 
 beforeEach(async () => {
   audio.instances.length = 0;
@@ -209,7 +366,7 @@ describe("Space audition input lifecycle", () => {
   });
   it("clears sound in page margins", async () => {
     await hold();
-    point(600, 10);
+    point(1000, 10);
     expect(lastVoices()).toEqual([]);
   });
   it("stops on lost window focus even when keyup never arrives", async () => {
@@ -242,12 +399,13 @@ describe("Space audition input lifecycle", () => {
   });
   it("Escape clears latched audition", async () => {
     point();
-    fireEvent.click(screen.getByRole("button", { name: "Audition" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
+    fireEvent.click(screen.getByRole("button", { name: "Latch audition" }));
     await waitFor(() => expect(engine().audition).toHaveBeenCalled());
     keyDown("Escape");
     expect(
       screen
-        .getByRole("button", { name: "Audition" })
+        .getByRole("button", { name: "Latch audition" })
         .getAttribute("aria-pressed"),
     ).toBe("false");
   });

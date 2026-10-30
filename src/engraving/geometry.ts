@@ -7,6 +7,7 @@ export interface Anchor {
 export interface MeasureBox {
   measureId: string;
   measureIndex: number;
+  system?: number;
   start: number;
   length: number;
   x: number;
@@ -35,6 +36,7 @@ export interface Layout {
   height: number;
   measures: MeasureBox[];
   notes: NoteBox[];
+  pages?: import("./pagination").PageBox[];
 }
 export interface Hit {
   measure: MeasureBox;

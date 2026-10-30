@@ -124,6 +124,28 @@ it("runs rapid full-worklet chord changes, retains bass, and drains every stop",
   send({ type: "stop", epoch: 3 });
   for (let i = 0; i < 10; i++) render();
   expect(processor.synth.voiceCount).toBe(0);
+  // Emulate a fast pointer jump over 24 sixteenths, then let the audio clock
+  // render every intermediate slice. The bass must attack only once.
+  const sweepStart = noteOn.mock.calls.length;
+  const frames = Array.from({ length: 24 }, (_, i) => [
+    voice,
+    { ...voice, id: `sweep-${i}`, midi: 60 + (i % 12), program: 73 },
+  ]);
+  send({ type: "sweep", epoch: 3, sequence: 1, direction: 1, frames });
+  let audibleSweepBlocks = 0;
+  for (let i = 0; i < 180; i++) {
+    if (i % 25 === 0) send({ type: "heartbeat", epoch: 3 });
+    render();
+    if (left.some((v) => Math.abs(v) > 0.00001)) audibleSweepBlocks++;
+  }
+  const sweepCalls = noteOn.mock.calls.slice(sweepStart);
+  expect(sweepCalls.filter((c) => c[1] === 36)).toHaveLength(1);
+  expect(sweepCalls.filter((c) => Number(c[1]) >= 60)).toHaveLength(24);
+  expect(audibleSweepBlocks).toBeGreaterThan(150);
+  send({ type: "stop", epoch: 4 });
+  for (let i = 0; i < 10; i++) render();
+  expect(processor.synth.voiceCount).toBe(0);
+  expect(left.every((v) => v === 0)).toBe(true);
   const sorted = timings.slice(50).sort((a, b) => a - b);
   await mkdir("artifacts/verification", { recursive: true });
   await writeFile(
@@ -136,6 +158,10 @@ it("runs rapid full-worklet chord changes, retains bass, and drains every stop",
         chordChanges: 500,
         notesPerChord: 17,
         heldBassAttacks: 1,
+        sweptShortNotes: 24,
+        sweptShortNotesHeard: 24,
+        sweepBassAttacks: 1,
+        audibleSweepBlocks,
         renderMedianMs: sorted[Math.floor(sorted.length * 0.5)],
         renderP99Ms: sorted[Math.floor(sorted.length * 0.99)],
         renderMaxMs: sorted.at(-1),

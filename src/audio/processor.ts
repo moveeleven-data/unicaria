@@ -31,6 +31,9 @@ class UnicariaProcessor extends AudioWorkletProcessor {
   private master = new SmoothGain(0.7);
   private count = 0;
   private peak = 0;
+  private scrubQueue: { voices: DesiredVoice[]; retrigger: boolean }[] = [];
+  private nextScrubAt = 0;
+  private scrubDirection = 0;
   constructor() {
     super();
     this.port.onmessage = (e) => {
@@ -38,6 +41,7 @@ class UnicariaProcessor extends AudioWorkletProcessor {
         this.mode = "idle";
         this.actions = [];
         this.chased = undefined;
+        this.scrubQueue = [];
         this.engine?.stop();
         this.reply({ type: "error", message: String(error) });
       });
@@ -82,6 +86,7 @@ class UnicariaProcessor extends AudioWorkletProcessor {
       this.mode = "idle";
       this.actions = [];
       this.chased = undefined;
+      this.scrubQueue = [];
       this.engine?.stop();
       return;
     }
@@ -90,6 +95,40 @@ class UnicariaProcessor extends AudioWorkletProcessor {
       return;
     }
     if (!this.engine) return;
+    if (m.type === "sweep") {
+      if (m.epoch > this.epoch) {
+        this.engine.stop();
+        this.sequence = -1;
+        this.scrubQueue = [];
+      }
+      if (m.sequence <= this.sequence) return;
+      // Validate the entire batch before allowing any of it onto the audio thread.
+      if (m.frames.some((frame) => frame.length > 256))
+        throw new Error("Audition exceeds 256 sounding pitches.");
+      this.epoch = m.epoch;
+      this.sequence = m.sequence;
+      this.mode = "scrub";
+      this.chased = undefined;
+      this.actions = [];
+      this.lease = currentTime + 0.5;
+      if (m.direction !== this.scrubDirection) {
+        this.scrubQueue = [];
+        this.nextScrubAt = currentTime;
+      }
+      this.scrubDirection = m.direction;
+      const identity = (voices: DesiredVoice[]) =>
+        voices.map((v) => `${v.id}:${v.program}:${v.midi}`).join("/");
+      for (const voices of m.frames) {
+        const tail = this.scrubQueue.at(-1);
+        if (tail && identity(tail.voices) === identity(voices))
+          tail.voices = voices;
+        else this.scrubQueue.push({ voices, retrigger: !!m.retrigger });
+      }
+      // A pathological full-score jump is bounded; normal pointer sweeps are much smaller.
+      if (this.scrubQueue.length > 512)
+        this.scrubQueue = this.scrubQueue.slice(-512);
+      return;
+    }
     if (m.type === "snapshot") {
       if (m.epoch > this.epoch) {
         this.engine.stop();
@@ -101,11 +140,15 @@ class UnicariaProcessor extends AudioWorkletProcessor {
       this.mode = "scrub";
       this.chased = undefined;
       this.actions = [];
+      this.scrubQueue = [];
+      this.scrubDirection = 0;
+      this.nextScrubAt = currentTime;
       this.lease = currentTime + 0.5;
       this.engine.snapshot(m.voices, currentTime, m.retrigger);
       return;
     }
     if (m.type === "play") {
+      this.scrubQueue = [];
       this.engine.stop();
       this.epoch = m.epoch;
       this.mode = "play";
@@ -143,7 +186,24 @@ class UnicariaProcessor extends AudioWorkletProcessor {
       this.engine.stop();
       this.actions = [];
       this.chased = undefined;
+      this.scrubQueue = [];
       this.reply({ type: "expired" });
+    }
+    if (
+      this.mode === "scrub" &&
+      this.scrubQueue.length &&
+      currentTime >= this.nextScrubAt
+    ) {
+      const frame = this.scrubQueue.shift()!;
+      try {
+        this.engine.snapshot(frame.voices, currentTime, frame.retrigger);
+        this.nextScrubAt = currentTime + 0.016;
+      } catch (error) {
+        this.scrubQueue = [];
+        this.engine.stop();
+        this.mode = "idle";
+        this.reply({ type: "error", message: String(error) });
+      }
     }
     if (this.mode === "play" && currentTime >= this.playAt) {
       if (this.chased) {

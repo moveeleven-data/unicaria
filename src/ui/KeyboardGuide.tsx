@@ -16,34 +16,43 @@ export function KeyboardGuide({
         <button className="modal-close" onClick={() => setHelp(false)}>
           ×
         </button>
-        <span className="eyebrow">MAKE THE SCORE YOUR INSTRUMENT</span>
-        <h2>Listen as you write.</h2>
+        <h2>Working in Unicaria</h2>
         <p>
-          Enable sound, hold <kbd>Space</kbd>, and move over the music. Every
-          sounding part at that position joins the harmony.
+          Click a measure to select it. Shift-click extends the selection; drag
+          selects part of a measure. Double-click expands to complete measures,
+          then all staves. Right-click for editing commands.
         </p>
         <div className="help-grid">
           {[
-            ["Space + move", "Audition all parts"],
-            ["Shift + Space", "Audition one staff"],
-            ["Ctrl + Space", "Alternate scrubbing shortcut"],
-            ["R while auditioning", "Reattack the chord"],
-            ["← / → while auditioning", "Step through boundaries"],
-            ["Escape", "Silence everything"],
-            ["Enter", "Play / stop"],
-            ["A–G", "Enter a note and advance"],
-            ["Shift + A–G", "Add a chord tone"],
-            ["N", "Select / Write mode"],
-            ["R", "Enter a rest"],
-            ["3", "Toggle triplet"],
-            ["5 / 6 / 7 / 8", "Eighth / quarter / half / whole"],
-            [".", "Cycle dots"],
+            ["Space + move", "Hear every part at the pointer"],
+            ["Shift + Space", "Hear the staff beneath the pointer"],
+            ["R / ← / → while held", "Reattack / step through the harmony"],
+            ["Esc", "Silence and return to Selection"],
+            ["Ctrl + Enter", "Play / stop (Shift starts at beginning)"],
+            ["N / Tools → Speedy", "Simple / Speedy Entry"],
+            ["A–G", "Simple: enter pitch; Speedy: choose pitch"],
+            ["1 / 2 / 3 / 4", "64th / 32nd / 16th / eighth"],
+            ["5 / 6 / 7", "Quarter / half / whole"],
+            ["Number in Speedy", "Enter chosen pitch and duration"],
+            ["0 / Shift + A–G", "Rest / add chord tone"],
+            [". / Ctrl + 3", "Dot / toggle triplets"],
+            ["Alt + number", "Change selected note duration"],
             ["T / Shift + T", "Tie / slur to next note"],
-            ["↑ / ↓", "Move selected pitches"],
-            ["Shift + ↑ / ↓", "Move an octave"],
+            ["↑ / ↓ / + / −", "Move pitch / change accidental"],
+            ["Alt + Shift + 1–4", "Choose layer"],
+            ["[ / ]", "Previous / next measure"],
+            ["Backspace", "Clear selected music, keeping measures"],
+            ["Delete (all-staff selection)", "Remove measures from the score"],
+            [
+              "Ctrl + C / X / V / I",
+              "Copy / cut / paste / insert copied music",
+            ],
+            ["Ctrl + A / Shift + arrows", "Select all / extend selection"],
             ["Ctrl + Z / Y", "Undo / redo"],
-            ["Ctrl + C / V", "Copy / paste selected chord"],
-            ["Ctrl + S / E", "Save / export MIDI"],
+            ["Ctrl + E / Ctrl + wheel", "Page–scroll view / zoom"],
+            ["Ctrl + G / M", "Go to measure / measures per system"],
+            ["Ctrl + S / Shift + Ctrl + S", "Save / Save as"],
+            ["File → Export MIDI", "Export playback as a MIDI file"],
           ].map(([key, desc]) => (
             <div key={key}>
               <kbd>{key}</kbd>

@@ -5,6 +5,7 @@ const dependencies = [
   ["React DOM", "node_modules/react-dom/LICENSE"],
   ["React Scheduler", "node_modules/scheduler/LICENSE"],
   ["VexFlow", "node_modules/vexflow/LICENSE"],
+  ["fflate", "node_modules/fflate/LICENSE"],
   ["SpessaSynth Core", "node_modules/spessasynth_core/LICENSE"],
   ["stb-vorbis", "node_modules/stb-vorbis/LICENSE"],
   ["Bravura music font", "node_modules/@vexflow-fonts/bravura/LICENSE.txt"],

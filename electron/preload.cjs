@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("desktop", {
   open: () => ipcRenderer.invoke("open"),
+  importXml: () => ipcRenderer.invoke("import-xml"),
   acceptOpen: (token) => ipcRenderer.invoke("accept-open", token),
   save: (payload) => ipcRenderer.invoke("save", payload),
   midi: (payload) => ipcRenderer.invoke("midi", payload),

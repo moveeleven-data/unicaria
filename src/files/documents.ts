@@ -1,10 +1,16 @@
 import { parseScore } from "../core/validation";
 import type { Score } from "../core/model";
 import { exportMidi } from "./midi";
+import {
+  decodeMusicXml,
+  importMusicXml,
+  type MusicXmlResult,
+} from "./musicxml";
 declare global {
   interface Window {
     desktop?: {
       open(): Promise<{ text: string; name: string; token: string } | null>;
+      importXml?(): Promise<{ bytes: number[]; name: string } | null>;
       acceptOpen(token: string): Promise<void>;
       save(payload: {
         text: string;
@@ -21,6 +27,38 @@ declare global {
       onCommand(callback: (name: string) => void): () => void;
     };
   }
+}
+export async function importXmlDocument(): Promise<MusicXmlResult | undefined> {
+  if (window.desktop?.importXml) {
+    const file = await window.desktop.importXml();
+    return file
+      ? importMusicXml(decodeMusicXml(new Uint8Array(file.bytes)))
+      : undefined;
+  }
+  return new Promise((resolve, reject) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".musicxml,.xml,.mxl";
+    input.onchange = async () => {
+      try {
+        const file = input.files?.[0];
+        if (!file) {
+          resolve(undefined);
+          return;
+        }
+        if (file.size > 20_000_000) throw new Error("MusicXML exceeds 20 MB.");
+        resolve(
+          importMusicXml(
+            decodeMusicXml(new Uint8Array(await file.arrayBuffer())),
+          ),
+        );
+      } catch (error) {
+        reject(error);
+      }
+    };
+    input.oncancel = () => resolve(undefined);
+    input.click();
+  });
 }
 function download(data: BlobPart, name: string, type: string) {
   const url = URL.createObjectURL(new Blob([data], { type })),

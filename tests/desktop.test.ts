@@ -41,6 +41,7 @@ beforeEach(async () => {
         cut: vi.fn(),
         undo: vi.fn(),
         redo: vi.fn(),
+        selectAll: vi.fn(),
       };
       on = vi.fn();
       once = vi.fn();
@@ -215,4 +216,19 @@ describe("desktop file boundary", () => {
     ).toBe(404);
     expect(net.fetch).not.toHaveBeenCalled();
   });
+});
+
+it("routes native Select All to the focused text editor", () => {
+  invoke("edit-text", "selectAll");
+  expect(window.webContents.selectAll).toHaveBeenCalledOnce();
+});
+it("imports MusicXML bytes selected by the native file dialog", async () => {
+  const filename = path.join(directory, "example.musicxml");
+  await writeFile(filename, '<score-partwise version="4.0"/>');
+  dialog.showOpenDialog.mockResolvedValue({
+    canceled: false,
+    filePaths: [filename],
+  });
+  const result = await invoke("import-xml");
+  expect(Buffer.from(result.bytes).toString()).toContain("score-partwise");
 });

@@ -66,6 +66,7 @@ app.whenReady().then(async () => {
     minHeight: 720,
     backgroundColor: "#eef1ec",
     title: "Unicaria",
+    autoHideMenuBar: true,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -127,6 +128,24 @@ app.whenReady().then(async () => {
     pendingOpenFile = undefined;
     dirty = false;
     return true;
+  });
+  ipcMain.handle("import-xml", async (event) => {
+    verifySender(event);
+    const result = await dialog.showOpenDialog(window, {
+      title: "Import MusicXML",
+      filters: [
+        { name: "MusicXML score", extensions: ["musicxml", "xml", "mxl"] },
+      ],
+      properties: ["openFile"],
+    });
+    if (result.canceled) return null;
+    const file = result.filePaths[0];
+    if ((await fs.stat(file)).size > 20_000_000)
+      throw new Error("MusicXML exceeds 20 MB.");
+    return {
+      bytes: Array.from(await fs.readFile(file)),
+      name: path.basename(file),
+    };
   });
   ipcMain.handle("save", async (event, payload) => {
     verifySender(event);
@@ -209,7 +228,7 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle("edit-text", (event, action) => {
     verifySender(event);
-    if (!["copy", "cut", "paste", "undo", "redo"].includes(action))
+    if (!["copy", "cut", "paste", "undo", "redo", "selectAll"].includes(action))
       throw new Error("Unknown edit command.");
     window.webContents[action]();
   });
@@ -240,9 +259,9 @@ app.whenReady().then(async () => {
           },
           {
             label: "Export MIDI…",
-            accelerator: "CmdOrCtrl+E",
             click: () => command("midi"),
           },
+          { label: "Import MusicXML…", click: () => command("importXml") },
           { type: "separator" },
           {
             label: "Print / PDF…",
@@ -281,11 +300,44 @@ app.whenReady().then(async () => {
             accelerator: "CmdOrCtrl+V",
             click: () => command("paste"),
           },
+          {
+            label: "Insert copied music",
+            accelerator: "CmdOrCtrl+I",
+            click: () => command("pasteInsert"),
+          },
+          {
+            label: "Select all",
+            accelerator: "CmdOrCtrl+A",
+            click: () => command("selectAll"),
+          },
+          { label: "Add measures…", click: () => command("addMeasures") },
+          { label: "Insert measures…", click: () => command("insertMeasures") },
+          { label: "Delete measures", click: () => command("deleteMeasures") },
         ],
       },
       {
         label: "View",
         submenu: [
+          {
+            label: "Page / Scroll view",
+            accelerator: "CmdOrCtrl+E",
+            click: () => command("toggleView"),
+          },
+          {
+            label: "Zoom in",
+            accelerator: "CmdOrCtrl+Plus",
+            click: () => command("zoomIn"),
+          },
+          {
+            label: "Zoom out",
+            accelerator: "CmdOrCtrl+-",
+            click: () => command("zoomOut"),
+          },
+          {
+            label: "Go to measure…",
+            accelerator: "CmdOrCtrl+G",
+            click: () => command("goTo"),
+          },
           { role: "togglefullscreen" },
           {
             label: "Keyboard guide",

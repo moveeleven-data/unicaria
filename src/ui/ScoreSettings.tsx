@@ -1,13 +1,12 @@
 import {
   id,
-  keySignatures,
   type Score,
   type Staff,
   type Instrument,
   type Measure,
   type Cursor,
 } from "../core/model";
-import { fromDecimal, value, ZERO } from "../core/rational";
+import { fromDecimal, value } from "../core/rational";
 import type { Dispatch, SetStateAction } from "react";
 type Commit = (change: (score: Score) => void) => boolean;
 
@@ -22,6 +21,7 @@ interface Props {
   setCursor: Dispatch<SetStateAction<Cursor>>;
   setSelected: Dispatch<SetStateAction<string | undefined>>;
   fileAction: (action: string) => Promise<void>;
+  command: (action: string) => void;
 }
 export function ScoreSettings({
   score,
@@ -34,6 +34,7 @@ export function ScoreSettings({
   setCursor,
   setSelected,
   fileAction,
+  command,
 }: Props) {
   return (
     <>
@@ -68,58 +69,12 @@ export function ScoreSettings({
       </section>
       <section>
         <h3>Measure {measureIndex + 1}</h3>
-        <div className="row">
-          <label>
-            Beats
-            <input
-              type="number"
-              min="1"
-              max="32"
-              value={measure.beats}
-              onChange={(e) =>
-                commit((s) => {
-                  for (let i = measureIndex; i < s.measures.length; i++)
-                    s.measures[i].beats = Number(e.target.value);
-                })
-              }
-            />
-          </label>
-          <label>
-            Beat unit
-            <select
-              value={measure.beatType}
-              onChange={(e) =>
-                commit((s) => {
-                  for (let i = measureIndex; i < s.measures.length; i++)
-                    s.measures[i].beatType = Number(e.target.value);
-                })
-              }
-            >
-              {[1, 2, 4, 8, 16, 32].map((v) => (
-                <option key={v}>{v}</option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <p className="muted small">
-          Meter changes apply from this measure onward. Existing notes must fit.
+        <p>
+          {measure.beats}/{measure.beatType} · {measure.key}
         </p>
-        <label>
-          Key signature
-          <select
-            value={measure.key}
-            onChange={(e) =>
-              commit((s) => {
-                for (let i = measureIndex; i < s.measures.length; i++)
-                  s.measures[i].key = e.target.value;
-              })
-            }
-          >
-            {keySignatures.map((k) => (
-              <option key={k}>{k}</option>
-            ))}
-          </select>
-        </label>
+        <button onClick={() => command("measureSettings")}>
+          Time / key signature…
+        </button>
         <label>
           Pickup length (0 = full bar)
           <input
@@ -180,40 +135,41 @@ export function ScoreSettings({
         </label>
         <button
           className="danger-link"
-          disabled={score.measures.length === 1}
-          onClick={() => {
-            const next = score.measures[Math.max(0, measureIndex - 1)];
-            commit((s) => {
-              const ids = new Set(
-                s.notes
-                  .filter((n) => n.measureId === measure.id)
-                  .map((n) => n.id),
-              );
-              s.measures = s.measures.filter((m) => m.id !== measure.id);
-              s.notes = s.notes.filter((n) => n.measureId !== measure.id);
-              s.marks = s.marks.filter(
-                (m) =>
-                  m.measureId !== measure.id && m.endMeasureId !== measure.id,
-              );
-              for (const n of s.notes) {
-                if (n.tieTo && ids.has(n.tieTo)) delete n.tieTo;
-                if (n.slurTo && ids.has(n.slurTo)) delete n.slurTo;
-              }
-            });
-            setCursor({
-              ...cursor,
-              measureId:
-                next.id === measure.id ? score.measures[1].id : next.id,
-              offset: ZERO,
-            });
-            setSelected(undefined);
-          }}
+          onClick={() => command("deleteMeasures")}
         >
-          Delete measure
+          Delete selected measures…
         </button>
       </section>
       <section>
         <h3>{staff.name}</h3>
+        <div className="row buttons">
+          {[-1, 1].map((direction) => (
+            <button
+              key={direction}
+              onClick={() =>
+                commit((s) => {
+                  const order = [
+                      ...new Set(s.staves.map((st) => st.instrumentId)),
+                    ],
+                    at = order.indexOf(instrument.id),
+                    to = at + direction;
+                  if (to < 0 || to >= order.length) return;
+                  [order[at], order[to]] = [order[to], order[at]];
+                  s.staves = order.flatMap((instrumentId) =>
+                    s.staves.filter((st) => st.instrumentId === instrumentId),
+                  );
+                  s.instruments.sort(
+                    (a, b) => order.indexOf(a.id) - order.indexOf(b.id),
+                  );
+                })
+              }
+            >
+              {direction < 0
+                ? "↑ Move instrument up"
+                : "↓ Move instrument down"}
+            </button>
+          ))}
+        </div>
         <label>
           Staff name
           <input
@@ -288,14 +244,19 @@ export function ScoreSettings({
         <button
           className="wide"
           onClick={() =>
-            commit((s) =>
-              s.staves.push({
+            commit((s) => {
+              const after =
+                s.staves.reduce(
+                  (last, x, i) => (x.instrumentId === instrument.id ? i : last),
+                  0,
+                ) + 1;
+              s.staves.splice(after, 0, {
                 id: id(),
                 instrumentId: instrument.id,
                 name: instrument.name,
                 clef: "bass",
-              }),
-            )
+              });
+            })
           }
         >
           ＋ Add staff to this instrument

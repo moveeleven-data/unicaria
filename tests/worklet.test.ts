@@ -65,6 +65,85 @@ beforeEach(async () => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe("audio-thread session protection", () => {
+  it("renders every queued scrub slice for at least 16 ms and retains common voices", async () => {
+    const bass = { ...voice, id: "bass", midi: 36 };
+    await message({ type: "snapshot", epoch: 1, sequence: 1, voices: [bass] });
+    await message({
+      type: "sweep",
+      epoch: 1,
+      sequence: 2,
+      direction: 1,
+      frames: Array.from({ length: 8 }, (_, i) => [
+        bass,
+        { ...voice, id: `short-${i}`, midi: 60 + i },
+      ]),
+    });
+    for (let i = 0; i < 64; i++) {
+      vi.stubGlobal("currentTime", i * 0.003);
+      processor.process([], [[new Float32Array(128), new Float32Array(128)]]);
+    }
+    expect(
+      state.synth.noteOn.mock.calls.filter((call: any[]) => call[1] === 36),
+    ).toHaveLength(1);
+    expect(
+      new Set(
+        state.synth.noteOn.mock.calls
+          .filter((call: any[]) => call[1] >= 60)
+          .map((call: any[]) => call[1]),
+      ).size,
+    ).toBe(8);
+  });
+  it("cancels every queued scrub slice on key release and rejects old-session sweeps", async () => {
+    await message({
+      type: "sweep",
+      epoch: 1,
+      sequence: 1,
+      direction: 1,
+      frames: [
+        [voice],
+        [{ ...voice, id: "b", midi: 62 }],
+        [{ ...voice, id: "c", midi: 64 }],
+      ],
+    });
+    processor.process([], [[new Float32Array(128), new Float32Array(128)]]);
+    await message({ type: "stop", epoch: 2 });
+    const count = state.synth.noteOn.mock.calls.length;
+    await message({
+      type: "sweep",
+      epoch: 1,
+      sequence: 99,
+      direction: 1,
+      frames: [[{ ...voice, id: "old" }]],
+    });
+    for (let i = 0; i < 30; i++) {
+      vi.stubGlobal("currentTime", i * 0.01);
+      processor.process([], [[new Float32Array(128), new Float32Array(128)]]);
+    }
+    expect(state.synth.noteOn).toHaveBeenCalledTimes(count);
+  });
+  it("replaces the pending direction immediately on a scrub reversal", async () => {
+    await message({
+      type: "sweep",
+      epoch: 1,
+      sequence: 1,
+      direction: 1,
+      frames: [
+        [{ ...voice, id: "forward", midi: 70 }],
+        [{ ...voice, id: "skipped", midi: 71 }],
+      ],
+    });
+    await message({
+      type: "sweep",
+      epoch: 1,
+      sequence: 2,
+      direction: -1,
+      frames: [[{ ...voice, id: "reverse", midi: 50 }]],
+    });
+    processor.process([], [[new Float32Array(128), new Float32Array(128)]]);
+    expect(state.synth.noteOn.mock.calls.map((call: any[]) => call[1])).toEqual(
+      [50],
+    );
+  });
   it("waits for the scheduled start before chasing a note at a mid-score offset", async () => {
     await message({
       type: "play",

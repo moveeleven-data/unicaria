@@ -171,6 +171,18 @@ export class AudioController {
     this.send({ type: "stop", epoch: this.epoch });
     this.onChange();
   }
+  sweep(frames: DesiredVoice[][], direction: number, retrigger = false) {
+    if (this.state !== "ready" || !frames.length) return;
+    if (this.playing) this.stop();
+    this.send({
+      type: "sweep",
+      epoch: this.epoch,
+      sequence: ++this.sequence,
+      frames,
+      direction,
+      retrigger,
+    });
+  }
   play(performance: Performance, offset = 0) {
     if (this.state !== "ready" || !this.context) return;
     this.stop();

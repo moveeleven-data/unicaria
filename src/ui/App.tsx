@@ -1,6 +1,35 @@
 import { KeyboardGuide } from "./KeyboardGuide";
 import { ScoreSettings } from "./ScoreSettings";
 import { InstrumentPanel } from "./InstrumentPanel";
+import { MenuBar } from "./MenuBar";
+import { CommandDialog, type DialogSpec } from "./CommandDialog";
+import {
+  fullMeasures,
+  isStack,
+  changeMeter,
+  cleanLinks,
+  clearRegion,
+  copyRegion,
+  deleteMeasures,
+  enterNote,
+  insertMeasures,
+  pasteRegion,
+  regionDescription,
+  regionNotes,
+  regionTimes,
+  repeatRegion,
+  transposeRegion,
+  type MusicClip,
+  type Region,
+} from "../core/editing";
+import {
+  extendRegion,
+  moveRegionEdge,
+  regionFromHits,
+  selectionRects,
+} from "./selection";
+import { defaultRenderOptions } from "../engraving/pagination";
+import { scrubFrames } from "../performance/scrub";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   absolute,
@@ -11,12 +40,13 @@ import {
   duration,
   id,
   keyAlter,
+  keySignatures,
   measureBeats,
   moveDiatonic,
   nextCursor,
   pitchFromMidi,
   pitchName,
-  putNote,
+  midiPitch,
   steps,
   type Articulation,
   type Cursor,
@@ -26,7 +56,15 @@ import {
   type Score,
   type Step,
 } from "../core/model";
-import { compare, fromDecimal, rat, sub, value, ZERO } from "../core/rational";
+import {
+  add,
+  compare,
+  fromDecimal,
+  rat,
+  sub,
+  value,
+  ZERO,
+} from "../core/rational";
 import { GM, dynamicValues } from "../core/instruments";
 import { validateScore } from "../core/validation";
 import { demoScore } from "../core/demo";
@@ -41,6 +79,7 @@ import { hitTest, xAtTime, type Hit, type Layout } from "../engraving/geometry";
 import { AudioController } from "../audio/controller";
 import {
   openDocument,
+  importXmlDocument,
   recoveryRead,
   recoveryWrite,
   saveDocument,
@@ -88,7 +127,58 @@ export function App() {
     });
   const [selected, setSelected] = useState<string>(),
     [entryDuration, setEntryDuration] = useState<Duration>(duration()),
-    [mode, setMode] = useState<"select" | "write">("select");
+    [mode, setMode] = useState<
+      | "select"
+      | "write"
+      | "speedy"
+      | "hand"
+      | "zoom"
+      | "expression"
+      | "articulation"
+      | "crescendo"
+      | "diminuendo"
+      | "slur"
+      | "erase"
+    >("select");
+  const [region, setRegion] = useState<Region>(),
+    [dialog, setDialog] = useState<DialogSpec>(),
+    [articulationValue, setArticulationValue] =
+      useState<Articulation>("staccato"),
+    [showInspector, setShowInspector] = useState(false),
+    [showInstruments, setShowInstruments] = useState(false),
+    [viewOptions, setViewOptions] = useState(defaultRenderOptions),
+    [fitPage, setFitPage] = useState(false),
+    [entryPitch, setEntryPitch] = useState<Pitch>({
+      step: "C",
+      alter: 0,
+      octave: 5,
+    }),
+    [contextMenu, setContextMenu] = useState<{ x: number; y: number }>(),
+    [dragRect, setDragRect] = useState<{
+      left: number;
+      top: number;
+      width: number;
+      height: number;
+    }>();
+  const gesture = useRef<
+    | {
+        kind: "region" | "pan" | "copy" | "note" | "shape" | "zoom";
+        x: number;
+        y: number;
+        left: number;
+        top: number;
+        hit?: Hit;
+        last?: Hit;
+        region?: Region;
+        noteId?: string;
+        moved: boolean;
+      }
+    | undefined
+  >(undefined);
+  const suppressContext = useRef(false);
+  const lastAudition = useRef<{ hit: Hit; scope: string } | undefined>(
+    undefined,
+  );
   const [scope, setScope] = useState<Scope["mode"]>("all"),
     [pedal, setPedal] = useState(true),
     [latched, setLatched] = useState(false),
@@ -97,12 +187,10 @@ export function App() {
     [playhead, setPlayhead] = useState<number>(),
     [hover, setHover] = useState<Hit>(),
     [zoom, setZoom] = useState(0.85),
-    [fitWidth, setFitWidth] = useState(true),
+    [fitWidth, setFitWidth] = useState(false),
     [concert, setConcert] = useState(false);
   const [dirty, setDirty] = useState(false),
-    [notice, setNotice] = useState(
-      "Hold Space and move across the score to hear the harmony.",
-    ),
+    [notice, setNotice] = useState("Ready"),
     [error, setError] = useState(false),
     [help, setHelp] = useState(false),
     [panel, setPanel] = useState<"note" | "score">("note");
@@ -124,7 +212,11 @@ export function App() {
     [audio] = useState(() => new AudioController()),
     undo = useRef<Score[]>([]),
     redo = useRef<Score[]>([]),
-    clipboard = useRef<Score["notes"][number] | undefined>(undefined);
+    clipboard = useRef<MusicClip | undefined>(undefined);
+  const selectionEdges = useRef<{
+    horizontal?: "start" | "end";
+    vertical?: "start" | "end";
+  }>({});
   const held = useRef(false),
     shift = useRef(false),
     controlGesture = useRef(false),
@@ -148,6 +240,7 @@ export function App() {
     setError(bad);
   };
   const stop = () => {
+    lastAudition.current = undefined;
     playRequest.current++;
     held.current = false;
     shift.current = false;
@@ -161,26 +254,57 @@ export function App() {
   };
   const refreshAudition = (hit = lastHit.current, retrigger = false) => {
     if (!(held.current || latchedRef.current) || !hit) {
+      lastAudition.current = undefined;
       if (held.current || latchedRef.current) audio.audition([]);
       return;
     }
-    const voices = index.at(hit.time, {
+    const auditionScope: Scope = {
       mode: shift.current ? "staff" : scope,
       staffId: hit.staffId,
       pedal,
-    });
+    };
+    const voices = index.at(hit.time, auditionScope);
     const membership = voices.map((v) => v.id).join("/");
-    audio.audition(
-      voices,
-      retrigger || (retriggerAll && membership !== lastMembership.current),
-    );
+    const previous = lastAudition.current,
+      scopeKey = `${auditionScope.mode}/${auditionScope.mode === "all" ? "" : hit.staffId}/${pedal}`;
+    if (audio.state !== "ready") {
+      lastAudition.current = undefined;
+      return;
+    }
+    if (
+      previous &&
+      previous.scope === scopeKey &&
+      previous.hit.time === hit.time &&
+      !retrigger
+    )
+      return;
+    if (
+      previous &&
+      previous.scope === scopeKey &&
+      (previous.hit.measure.system ?? previous.hit.measure.top) ===
+        (hit.measure.system ?? hit.measure.top) &&
+      !retrigger &&
+      Math.abs(previous.hit.time - hit.time) > 1e-8
+    ) {
+      audio.sweep(
+        scrubFrames(index, previous.hit.time, hit.time, auditionScope),
+        Math.sign(hit.time - previous.hit.time),
+        retriggerAll,
+      );
+    } else
+      audio.audition(
+        voices,
+        retrigger || (retriggerAll && membership !== lastMembership.current),
+      );
     lastMembership.current = membership;
+    lastAudition.current = { hit, scope: scopeKey };
   };
   const commit = (change: (draft: Score) => void) => {
     try {
       const draft = cloneScore(score);
       change(draft);
       validateScore(draft);
+      lastAudition.current = undefined;
       playRequest.current++;
       audio.stop();
       undo.current.push(score);
@@ -207,11 +331,20 @@ export function App() {
     to.push(score);
     setScore(next);
     setSelected(undefined);
+    setRegion(undefined);
+    const keptMeasure =
+      next.measures.find((m) => m.id === cursor.measureId) ??
+      next.measures[Math.min(measureIndex, next.measures.length - 1)];
     setCursor({
-      staffId: next.staves[0].id,
-      measureId: next.measures[0].id,
-      offset: ZERO,
-      voice: 0,
+      ...cursor,
+      staffId: next.staves.some((s) => s.id === cursor.staffId)
+        ? cursor.staffId
+        : next.staves[0].id,
+      measureId: keptMeasure.id,
+      offset:
+        compare(cursor.offset, measureBeats(keptMeasure)) < 0
+          ? cursor.offset
+          : ZERO,
     });
     setDirty(true);
     setHistoryTick((n) => n + 1);
@@ -226,6 +359,7 @@ export function App() {
       voice: 0,
     });
     setSelected(undefined);
+    setRegion(undefined);
     undo.current = [];
     redo.current = [];
     setDirty(false);
@@ -234,6 +368,35 @@ export function App() {
   };
   const fileAction = async (action: string) => {
     try {
+      if (dirty && ["new", "open", "importXml"].includes(action))
+        await recoveryWrite(score);
+      if (action === "importXml") {
+        stop();
+        if (
+          dirty &&
+          !confirm(
+            "Import another score? Your unsaved work remains in recovery.",
+          )
+        )
+          return;
+        const result = await importXmlDocument();
+        if (!result) return;
+        await window.desktop?.newFile();
+        replaceScore(result.score);
+        setDirty(true);
+        setRecovery(undefined);
+        report(
+          `Imported ${result.score.title} · ${result.score.measures.length} measures · ${result.score.staves.length} staves`,
+        );
+        if (result.warnings.length)
+          setDialog({
+            title: "MusicXML import notes",
+            description: result.warnings.join(" "),
+            fields: [],
+            submit: "Continue",
+            apply: () => true,
+          });
+      }
       if (action === "save" || action === "saveAs") {
         stop();
         const name = await saveDocument(score, action === "saveAs");
@@ -275,6 +438,8 @@ export function App() {
       }
       if (action === "print") {
         stop();
+        const { preparePrint } = await import("../engraving/print");
+        preparePrint(score, concert, viewOptions);
         if (window.desktop) await window.desktop.print();
         else window.print();
       }
@@ -286,7 +451,7 @@ export function App() {
     try {
       await audio.enable();
       audio.volume(master);
-      report("Sound ready. Hold Space over the score.");
+      report("Sound ready.");
     } catch (e) {
       report(String(e), true);
     }
@@ -346,11 +511,12 @@ export function App() {
         draft.measures.push(m);
         destination = { ...at, measureId: m.id, offset: ZERO };
       }
-      const n = putNote(draft, destination, d, pitches);
+      const n = enterNote(draft, destination, d, pitches)[0];
       created = n.id;
       next = nextCursor(draft, destination, beats(d));
     });
     if (accepted && created) {
+      setRegion(undefined);
       setSelected(created);
       setCursor(next);
       report(
@@ -361,6 +527,13 @@ export function App() {
     }
   };
   const remove = () => {
+    if (region) {
+      if (commit((s) => clearRegion(s, region))) {
+        setSelected(undefined);
+        report("Selected music cleared. Measures retained.");
+      }
+      return;
+    }
     if (!note) return;
     const at = {
       staffId: note.staffId,
@@ -379,14 +552,20 @@ export function App() {
     setCursor(at);
   };
   const editNote = (change: (n: NonNullable<typeof note>) => void) => {
-    if (note) commit((s) => change(s.notes.find((n) => n.id === note.id)!));
+    if (note)
+      commit((s) => {
+        change(s.notes.find((n) => n.id === note.id)!);
+        cleanLinks(s);
+      });
   };
   const addMark = () => {
-    const at = note
-      ? { measureId: note.measureId, offset: note.offset }
-      : cursor;
+    const at =
+      region?.start ??
+      (note ? { measureId: note.measureId, offset: note.offset } : cursor);
     const start = value(absolute(index.starts, at)),
-      end = Math.min(index.length, start + Math.max(0.125, markLength));
+      end = region
+        ? value(absolute(index.starts, region.end))
+        : Math.min(index.length, start + Math.max(0.125, markLength));
     const endMeasure =
       [...score.measures]
         .reverse()
@@ -438,7 +617,498 @@ export function App() {
       });
     });
   };
-  const pointer = (e: React.PointerEvent<HTMLDivElement>) => {
+  const activeRegion = (): Region =>
+    region ??
+    (note
+      ? {
+          start: { measureId: note.measureId, offset: note.offset },
+          end: {
+            measureId: note.measureId,
+            offset: add(note.offset, beats(note.duration)),
+          },
+          staffIds: [note.staffId],
+        }
+      : fullMeasures(
+          score,
+          Math.max(0, measureIndex),
+          Math.max(0, measureIndex),
+          score.staves.indexOf(staff),
+          score.staves.indexOf(staff),
+        ));
+  const chooseRegion = (next: Region) => {
+    setRegion(next);
+    setSelected(undefined);
+    setCursor({ ...cursor, ...next.start, staffId: next.staffIds[0] });
+  };
+  const zoomTo = (z: number, point?: { x: number; y: number }) => {
+    const element = scrollHost.current;
+    const next = Math.max(0.1, Math.min(4, z));
+    setFitWidth(false);
+    setFitPage(false);
+    if (element) {
+      const rect = element.getBoundingClientRect(),
+        x = point ? point.x - rect.left : element.clientWidth / 2,
+        y = point ? point.y - rect.top : element.clientHeight / 2;
+      const left = ((element.scrollLeft + x) * next) / zoom - x,
+        top = ((element.scrollTop + y) * next) / zoom - y;
+      requestAnimationFrame(() => {
+        element.scrollLeft = left;
+        element.scrollTop = top;
+      });
+    }
+    setZoom(next);
+  };
+  const revealMeasure = (mi: number) => {
+    const m = layout?.measures[mi],
+      scroller = scrollHost.current;
+    if (m && scroller) {
+      scroller.scrollLeft = Math.max(0, m.x * zoom - 150);
+      scroller.scrollTop = Math.max(0, m.top * zoom - 110);
+    }
+  };
+  const openNumberDialog = (
+    title: string,
+    label: string,
+    initial: number,
+    apply: (n: number) => boolean | void,
+    max = 2000,
+  ) => {
+    stop();
+    setDialog({
+      title,
+      fields: [{ name: "count", label, value: initial, min: 1, max }],
+      submit: "Apply",
+      apply: (v) => apply(Number(v.count)),
+    });
+  };
+  const command = (action: string) => {
+    setContextMenu(undefined);
+    if (
+      ["new", "open", "save", "saveAs", "midi", "print", "importXml"].includes(
+        action,
+      )
+    ) {
+      void fileAction(action);
+      return;
+    }
+    if (action === "undo") return history(true);
+    if (action === "redo") return history(false);
+    if (action === "copy" || action === "cut") {
+      clipboard.current = copyRegion(score, activeRegion());
+      if (action === "cut") commit((s) => clearRegion(s, activeRegion()));
+      report(action === "copy" ? "Music copied." : "Music cut.");
+      return;
+    }
+    if (action === "paste" || action === "pasteInsert") {
+      if (!clipboard.current) {
+        report("Copy some music first.");
+        return;
+      }
+      let pasted: Region | undefined;
+      const at = region
+        ? { ...cursor, ...region.start, staffId: region.staffIds[0] }
+        : cursor;
+      if (
+        commit((s) => {
+          pasted = pasteRegion(
+            s,
+            clipboard.current!,
+            at,
+            action === "pasteInsert",
+          );
+        }) &&
+        pasted
+      ) {
+        chooseRegion(pasted);
+        report(
+          action === "pasteInsert" ? "Copied music inserted." : "Music pasted.",
+        );
+      }
+      return;
+    }
+    if (action === "clear") {
+      if (commit((s) => clearRegion(s, activeRegion())))
+        report("Selected music cleared. Measures retained.");
+      return;
+    }
+    if (action === "deleteMeasures") {
+      let destination = cursor.measureId;
+      if (
+        commit((s) => {
+          destination = deleteMeasures(s, activeRegion());
+        })
+      ) {
+        setRegion(undefined);
+        setSelected(undefined);
+        setCursor({ ...cursor, measureId: destination, offset: ZERO });
+        report("Measures deleted. Undo restores them.");
+      }
+      return;
+    }
+    if (action === "selectAll") {
+      chooseRegion(fullMeasures(score, 0, score.measures.length - 1));
+      setMode("select");
+      return;
+    }
+    if (action === "addMeasures" || action === "insertMeasures") {
+      const at =
+        action === "addMeasures"
+          ? score.measures.length
+          : score.measures.findIndex(
+              (m) => m.id === activeRegion().start.measureId,
+            );
+      openNumberDialog(
+        action === "addMeasures" ? "Add measures" : "Insert measures",
+        action === "addMeasures"
+          ? "Number to add at the end"
+          : `Number to insert before measure ${at + 1}`,
+        1,
+        (n) =>
+          commit((s) => {
+            insertMeasures(s, at, n);
+          }),
+      );
+      return;
+    }
+    if (action === "transpose") {
+      const r = activeRegion();
+      stop();
+      setDialog({
+        title: "Transpose music",
+        description: regionDescription(score, r),
+        fields: [
+          {
+            name: "semitones",
+            label: "Semitones (12 = octave up, −12 = octave down)",
+            value: 12,
+            min: -48,
+            max: 48,
+          },
+        ],
+        submit: "Transpose",
+        apply: (v) => commit((s) => transposeRegion(s, r, Number(v.semitones))),
+      });
+      return;
+    }
+    if (action === "repeat") {
+      const r = activeRegion();
+      openNumberDialog(
+        "Repeat selected music",
+        "Additional copies after the selection",
+        1,
+        (n) => commit((s) => repeatRegion(s, r, n)),
+        100,
+      );
+      return;
+    }
+    if (action === "fitMeasures") {
+      stop();
+      setDialog({
+        title: "Measures per system",
+        description:
+          "This is the maximum per line. Dense music uses fewer measures to keep notation readable.",
+        fields: [
+          {
+            name: "count",
+            label: "Measures per system (0 = automatic spacing)",
+            value: viewOptions.measuresPerSystem,
+            min: 0,
+            max: 8,
+          },
+        ],
+        submit: "Apply",
+        apply: (v) => {
+          setViewOptions({
+            ...viewOptions,
+            measuresPerSystem: Number(v.count),
+          });
+        },
+      });
+      return;
+    }
+    if (action === "pageLayout") {
+      stop();
+      setDialog({
+        title: "Page layout",
+        description:
+          "Dense music may use fewer measures per system to prevent collisions.",
+        fields: [
+          {
+            name: "spacing",
+            label: "Staff spacing",
+            value: viewOptions.staffSpacing,
+            min: 72,
+            max: 200,
+          },
+          {
+            name: "measures",
+            label: "Measures per system (0 = automatic)",
+            value: viewOptions.measuresPerSystem,
+            min: 0,
+            max: 8,
+          },
+          {
+            name: "arrangement",
+            label: "Page arrangement",
+            value: viewOptions.arrangement,
+            options: [
+              { value: "horizontal", label: "Side by side" },
+              { value: "vertical", label: "Vertical" },
+            ],
+          },
+        ],
+        submit: "Apply",
+        apply: (v) =>
+          setViewOptions({
+            ...viewOptions,
+            staffSpacing: Number(v.spacing),
+            measuresPerSystem: Number(v.measures),
+            arrangement: v.arrangement as "horizontal" | "vertical",
+          }),
+      });
+      return;
+    }
+    if (action === "goTo") {
+      openNumberDialog(
+        "Go to measure",
+        "Measure",
+        measureIndex + 1,
+        (n) => {
+          if (n < 1 || n > score.measures.length) return false;
+          setCursor({
+            ...cursor,
+            measureId: score.measures[n - 1].id,
+            offset: ZERO,
+          });
+          revealMeasure(n - 1);
+        },
+        score.measures.length,
+      );
+      return;
+    }
+    if (action === "selectRegion") {
+      const r = activeRegion();
+      stop();
+      setDialog({
+        title: "Select region",
+        fields: [
+          {
+            name: "first",
+            label: "From measure",
+            value:
+              score.measures.findIndex((m) => m.id === r.start.measureId) + 1,
+            min: 1,
+            max: score.measures.length,
+          },
+          {
+            name: "last",
+            label: "Through measure",
+            value:
+              score.measures.findIndex((m) => m.id === r.end.measureId) + 1,
+            min: 1,
+            max: score.measures.length,
+          },
+          {
+            name: "top",
+            label: "From staff",
+            value: score.staves.findIndex((s) => s.id === r.staffIds[0]),
+            options: score.staves.map((s, i) => ({ value: i, label: s.name })),
+          },
+          {
+            name: "bottom",
+            label: "Through staff",
+            value: score.staves.findIndex((s) => s.id === r.staffIds.at(-1)),
+            options: score.staves.map((s, i) => ({ value: i, label: s.name })),
+          },
+        ],
+        submit: "Select",
+        apply: (v) => {
+          chooseRegion(
+            fullMeasures(
+              score,
+              Number(v.first) - 1,
+              Number(v.last) - 1,
+              Number(v.top),
+              Number(v.bottom),
+            ),
+          );
+          setMode("select");
+        },
+      });
+      return;
+    }
+    if (action === "document") {
+      stop();
+      setDialog({
+        title: "Score information",
+        fields: [
+          { name: "title", label: "Title", value: score.title },
+          { name: "composer", label: "Composer", value: score.composer },
+        ],
+        submit: "Apply",
+        apply: (v) =>
+          commit((s) => {
+            s.title = v.title;
+            s.composer = v.composer;
+          }),
+      });
+      return;
+    }
+    if (action === "measureSettings") {
+      const r = activeRegion(),
+        first = score.measures.findIndex((m) => m.id === r.start.measureId),
+        last = score.measures.findIndex((m) => m.id === r.end.measureId),
+        m = score.measures[first];
+      stop();
+      setDialog({
+        title: "Time and key signature",
+        description:
+          "Apply to the measure range below. Existing pitches stay the same when changing key.",
+        fields: [
+          {
+            name: "first",
+            label: "From measure",
+            value: first + 1,
+            min: 1,
+            max: score.measures.length,
+          },
+          {
+            name: "last",
+            label: "Through measure",
+            value: last + 1,
+            min: 1,
+            max: score.measures.length,
+          },
+          {
+            name: "beats",
+            label: "Beats per measure",
+            value: m.beats,
+            min: 1,
+            max: 32,
+          },
+          {
+            name: "unit",
+            label: "Beat unit",
+            value: m.beatType,
+            options: [1, 2, 4, 8, 16, 32].map((n) => ({
+              value: n,
+              label: String(n),
+            })),
+          },
+          {
+            name: "key",
+            label: "Key signature",
+            value: m.key,
+            options: keySignatures.map((k) => ({ value: k, label: k })),
+          },
+          {
+            name: "rebar",
+            label: "Existing music",
+            value: "yes",
+            options: [
+              { value: "yes", label: "Rebar and tie across barlines" },
+              { value: "no", label: "Keep measure positions (notes must fit)" },
+            ],
+          },
+        ],
+        submit: "Apply",
+        apply: (v) =>
+          commit((s) => {
+            const a = Number(v.first) - 1,
+              b = Number(v.last) - 1;
+            if (a > b)
+              throw new Error("The final measure must follow the first.");
+            for (let i = a; i <= b; i++) s.measures[i].key = v.key;
+            if (
+              s.measures
+                .slice(a, b + 1)
+                .some(
+                  (m) =>
+                    m.beats !== Number(v.beats) ||
+                    m.beatType !== Number(v.unit),
+                )
+            )
+              changeMeter(
+                s,
+                a,
+                b,
+                Number(v.beats),
+                Number(v.unit),
+                v.rebar === "yes",
+              );
+          }),
+      });
+      return;
+    }
+    if (action === "page" || action === "scroll") {
+      setViewOptions({ ...viewOptions, view: action });
+      return;
+    }
+    if (action === "horizontal" || action === "vertical") {
+      setViewOptions({ ...viewOptions, arrangement: action, view: "page" });
+      return;
+    }
+    if (action === "toggleView") {
+      setViewOptions({
+        ...viewOptions,
+        view: viewOptions.view === "page" ? "scroll" : "page",
+      });
+      return;
+    }
+    if (action === "zoomIn") return zoomTo(zoom * 1.2);
+    if (action === "zoomOut") return zoomTo(zoom / 1.2);
+    if (action === "zoom100") return zoomTo(1);
+    if (action === "fitWidth") {
+      setFitPage(false);
+      setFitWidth(true);
+      return;
+    }
+    if (action === "fitPage") {
+      setFitWidth(false);
+      setFitPage(true);
+      return;
+    }
+    if (action === "concert") {
+      setConcert(!concert);
+      return;
+    }
+    if (action === "instruments") {
+      setShowInstruments(!showInstruments);
+      return;
+    }
+    if (action === "inspector") {
+      setShowInspector(!showInspector);
+      return;
+    }
+    if (action === "help") {
+      stop();
+      setHelp(true);
+      return;
+    }
+    if (
+      [
+        "select",
+        "write",
+        "speedy",
+        "hand",
+        "zoom",
+        "expression",
+        "articulation",
+        "crescendo",
+        "diminuendo",
+        "slur",
+        "erase",
+      ].includes(action)
+    ) {
+      setMode(action as typeof mode);
+      setRegion(undefined);
+      if (action === "expression" || action === "articulation") {
+        setShowInspector(true);
+        setPanel("note");
+      }
+    }
+  };
+  const pointer = (e: { clientX: number; clientY: number }) => {
     if (!layout || !host.current) return;
     const bounds = host.current.getBoundingClientRect();
     return hitTest(
@@ -460,7 +1130,14 @@ export function App() {
           Math.abs(n.x - x) < 18,
       )
       .sort((a, b) => Math.abs(a.y - y) - Math.abs(b.y - y))[0];
-    if (nearby && mode === "select") {
+    if (
+      nearby &&
+      (mode === "speedy" ||
+        mode === "erase" ||
+        mode === "articulation" ||
+        e.ctrlKey ||
+        e.metaKey)
+    ) {
       const existing = score.notes.find((n) => n.id === nearby.id)!;
       setSelected(existing.id);
       setCursor({
@@ -470,6 +1147,56 @@ export function App() {
         voice: existing.voice,
       });
       setPanel("note");
+      setRegion(undefined);
+      setEntryPitch(existing.pitches[0] ?? entryPitch);
+      if (mode === "erase")
+        commit((s) => {
+          s.notes = s.notes.filter((n) => n.id !== existing.id);
+          for (const n of s.notes) {
+            if (n.tieTo === existing.id) delete n.tieTo;
+            if (n.slurTo === existing.id) delete n.slurTo;
+          }
+        });
+      if (mode === "articulation") {
+        commit((s) => {
+          const n = s.notes.find((n) => n.id === existing.id)!;
+          n.articulation =
+            n.articulation === articulationValue ? "" : articulationValue;
+        });
+      }
+      return;
+    }
+    if (nearby && mode === "write" && !e.ctrlKey && !e.metaKey) {
+      const existing = score.notes.find((n) => n.id === nearby.id)!;
+      const pitch = {
+        ...hit.pitch,
+        alter: keyAlter(hit.pitch.step, measure.key),
+      };
+      if (
+        existing.pitches.length &&
+        !existing.pitches.some((p) => midiPitch(p) === midiPitch(pitch)) &&
+        Math.abs(nearby.y - y) > 5
+      ) {
+        if (
+          commit((s) => {
+            s.notes.find((n) => n.id === existing.id)!.pitches.push(pitch);
+          })
+        ) {
+          setSelected(existing.id);
+          setRegion(undefined);
+        }
+        return;
+      }
+      insert(
+        existing.pitches,
+        {
+          staffId: existing.staffId,
+          measureId: existing.measureId,
+          offset: existing.offset,
+          voice: existing.voice,
+        },
+        entryDuration,
+      );
       return;
     }
     const unit = value(beats(entryDuration)),
@@ -493,6 +1220,11 @@ export function App() {
     );
     setCursor(at);
     setSelected(undefined);
+    setEntryPitch({
+      ...hit.pitch,
+      alter: keyAlter(hit.pitch.step, measure.key),
+    });
+    setRegion(undefined);
     if (mode === "write") {
       const pitch = {
         ...hit.pitch,
@@ -502,6 +1234,335 @@ export function App() {
         ),
       };
       insert([pitch], at);
+    }
+  };
+
+  const pointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 && e.button !== 1 && e.button !== 2) return;
+    selectionEdges.current = {};
+    scrollHost.current?.focus();
+    setContextMenu(undefined);
+    if (held.current || latchedRef.current) return;
+    const hit = pointer(e),
+      element = scrollHost.current!;
+    if (e.button === 1 || e.button === 2 || mode === "hand") {
+      gesture.current = {
+        kind: "pan",
+        x: e.clientX,
+        y: e.clientY,
+        left: element.scrollLeft,
+        top: element.scrollTop,
+        moved: false,
+      };
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+      return;
+    }
+    if (!hit) {
+      if (layout && host.current) {
+        const bounds = host.current.getBoundingClientRect(),
+          x = (e.clientX - bounds.left) / zoom,
+          y = (e.clientY - bounds.top) / zoom;
+        const box = layout.measures.find(
+          (m) => x >= m.x - 125 && x < m.x && y >= m.top && y <= m.bottom,
+        );
+        if (box) {
+          const st = box.staves.reduce((a, b) =>
+            Math.abs(y - a.lineBottom + 20) < Math.abs(y - b.lineBottom + 20)
+              ? a
+              : b,
+          );
+          const si = score.staves.findIndex((s) => s.id === st.id);
+          const r = fullMeasures(score, 0, score.measures.length - 1, si, si);
+          if (e.shiftKey && region) {
+            r.staffIds = score.staves
+              .slice(
+                Math.min(
+                  si,
+                  score.staves.findIndex((s) => s.id === region.staffIds[0]),
+                ),
+                Math.max(
+                  si,
+                  score.staves.findIndex(
+                    (s) => s.id === region.staffIds.at(-1),
+                  ),
+                ) + 1,
+              )
+              .map((s) => s.id);
+          }
+          chooseRegion(r);
+          return;
+        }
+      }
+      setRegion(undefined);
+      setSelected(undefined);
+      return;
+    }
+    if (mode === "zoom") {
+      gesture.current = {
+        kind: "zoom",
+        x: e.clientX,
+        y: e.clientY,
+        left: 0,
+        top: 0,
+        hit,
+        last: hit,
+        moved: false,
+      };
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      return;
+    }
+    if (["crescendo", "diminuendo", "slur"].includes(mode)) {
+      gesture.current = {
+        kind: "shape",
+        x: e.clientX,
+        y: e.clientY,
+        left: 0,
+        top: 0,
+        hit,
+        last: hit,
+        moved: false,
+      };
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      return;
+    }
+    if (mode === "select" && !e.ctrlKey && !e.metaKey) {
+      const inside =
+        region &&
+        region.staffIds.includes(hit.staffId) &&
+        hit.time >= value(regionTimes(score, region).start) &&
+        hit.time < value(regionTimes(score, region).end);
+      gesture.current = {
+        kind: inside && !e.shiftKey ? "copy" : "region",
+        x: e.clientX,
+        y: e.clientY,
+        left: 0,
+        top: 0,
+        hit,
+        last: hit,
+        region,
+        moved: false,
+      };
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      if (e.shiftKey && region) chooseRegion(extendRegion(score, region, hit));
+      else if (!inside) {
+        const si = score.staves.findIndex((s) => s.id === hit.staffId);
+        chooseRegion(
+          fullMeasures(
+            score,
+            hit.measure.measureIndex,
+            hit.measure.measureIndex,
+            si,
+            si,
+          ),
+        );
+      }
+      return;
+    }
+    if (mode === "expression") {
+      selectHit(hit, e);
+      setShowInspector(true);
+      setPanel("note");
+      return;
+    }
+    selectHit(hit, e);
+    if ((mode === "write" && (e.ctrlKey || e.metaKey)) || mode === "speedy") {
+      const bounds = host.current!.getBoundingClientRect(),
+        x = (e.clientX - bounds.left) / zoom;
+      const closest = layout?.notes.find(
+        (n) =>
+          n.staffId === hit.staffId &&
+          n.measureId === hit.measure.measureId &&
+          Math.abs(n.x - x) < 18,
+      );
+      if (closest) {
+        gesture.current = {
+          kind: "note",
+          x: e.clientX,
+          y: e.clientY,
+          left: 0,
+          top: 0,
+          hit,
+          last: hit,
+          noteId: closest.id,
+          moved: false,
+        };
+        e.currentTarget.setPointerCapture?.(e.pointerId);
+      }
+    }
+  };
+  const pointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const hit = pointer(e);
+    lastHit.current = hit;
+    setHover(hit);
+    if (held.current || latchedRef.current) {
+      refreshAudition(hit);
+      return;
+    }
+    const g = gesture.current;
+    if (!g) return;
+    if (Math.hypot(e.clientX - g.x, e.clientY - g.y) > 4) g.moved = true;
+    if (g.kind === "pan") {
+      if (scrollHost.current) {
+        scrollHost.current.scrollLeft = g.left - (e.clientX - g.x);
+        scrollHost.current.scrollTop = g.top - (e.clientY - g.y);
+      }
+      return;
+    }
+    if (!hit) return;
+    g.last = hit;
+    if (g.kind === "region" && g.moved && g.hit)
+      chooseRegion(regionFromHits(score, g.hit, hit, e.shiftKey));
+    if (g.kind === "zoom" && g.moved && host.current) {
+      const b = host.current.getBoundingClientRect();
+      setDragRect({
+        left: (Math.min(g.x, e.clientX) - b.left) / zoom,
+        top: (Math.min(g.y, e.clientY) - b.top) / zoom,
+        width: Math.abs(e.clientX - g.x) / zoom,
+        height: Math.abs(e.clientY - g.y) / zoom,
+      });
+    }
+    if (g.kind === "shape" && g.hit)
+      chooseRegion(regionFromHits(score, g.hit, hit));
+    if (g.moved && scrollHost.current) {
+      const b = scrollHost.current.getBoundingClientRect();
+      if (e.clientX > b.right - 35) scrollHost.current.scrollLeft += 18;
+      if (e.clientX < b.left + 35) scrollHost.current.scrollLeft -= 18;
+      if (e.clientY > b.bottom - 35) scrollHost.current.scrollTop += 18;
+      if (e.clientY < b.top + 35) scrollHost.current.scrollTop -= 18;
+    }
+  };
+  const pointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const g = gesture.current;
+    gesture.current = undefined;
+    setDragRect(undefined);
+    if (!g) return;
+    if (e.currentTarget.hasPointerCapture?.(e.pointerId))
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    if (g.kind === "pan") {
+      suppressContext.current = g.moved;
+      return;
+    }
+    const end = g.last ?? g.hit;
+    if (!end) return;
+    if (g.kind === "zoom") {
+      if (g.moved && scrollHost.current) {
+        const factor = Math.min(
+          (scrollHost.current.clientWidth - 80) /
+            Math.max(20, Math.abs(e.clientX - g.x)),
+          (scrollHost.current.clientHeight - 80) /
+            Math.max(20, Math.abs(e.clientY - g.y)),
+        );
+        zoomTo(zoom * factor, {
+          x: (g.x + e.clientX) / 2,
+          y: (g.y + e.clientY) / 2,
+        });
+      } else
+        zoomTo(e.ctrlKey ? zoom / 1.25 : zoom * 1.25, {
+          x: e.clientX,
+          y: e.clientY,
+        });
+      return;
+    }
+    if (g.kind === "copy" && g.moved && g.region) {
+      const clip = copyRegion(score, g.region);
+      let pasted: Region | undefined;
+      const at = {
+        staffId: end.staffId,
+        measureId: end.measure.measureId,
+        offset: isStack(score, g.region) ? ZERO : end.offset,
+        voice: cursor.voice,
+      };
+      // Dragging aligns to a beat; full-measure clips align to barlines.
+      if (g.region.start.offset.n === 0) at.offset = ZERO;
+      else at.offset = fromDecimal(Math.floor(value(end.offset)));
+      if (
+        commit((s) => {
+          pasted = pasteRegion(s, clip, at, e.altKey);
+        }) &&
+        pasted
+      )
+        chooseRegion(pasted);
+      return;
+    }
+    if (g.kind === "note" && g.moved && g.noteId) {
+      commit((s) => {
+        const n = s.notes.find((n) => n.id === g.noteId);
+        if (n?.pitches.length) {
+          const difference =
+            (end.pitch.octave - g.hit!.pitch.octave) * 7 +
+            steps.indexOf(end.pitch.step) -
+            steps.indexOf(g.hit!.pitch.step);
+          n.pitches = n.pitches.map((p) => moveDiatonic(p, difference));
+        }
+      });
+      return;
+    }
+    if (g.kind === "shape" && g.hit) {
+      const r = regionFromHits(score, g.hit, end);
+      chooseRegion(r);
+      if (mode === "slur") {
+        const entries = regionNotes(score, r)
+          .filter(
+            (n) =>
+              n.staffId === g.hit!.staffId &&
+              n.voice === cursor.voice &&
+              n.pitches.length,
+          )
+          .sort((a, b) =>
+            compare(absolute(index.starts, a), absolute(index.starts, b)),
+          );
+        if (entries.length > 1)
+          commit((s) => {
+            s.notes.find((n) => n.id === entries[0].id)!.slurTo =
+              entries.at(-1)!.id;
+          });
+      } else
+        commit((s) =>
+          s.marks.push({
+            id: id(),
+            kind: "hairpin",
+            staffId: g.hit!.staffId,
+            ...r.start,
+            endMeasureId: r.end.measureId,
+            endOffset: r.end.offset,
+            text: mode === "crescendo" ? "cresc." : "dim.",
+            amount: mode === "crescendo" ? 60 : 100,
+            target: mode === "crescendo" ? 100 : 60,
+          }),
+        );
+    }
+  };
+  const doubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (held.current || latchedRef.current) return;
+    const hit = pointer(e);
+    if (!hit) return;
+    if (mode === "select") {
+      const r =
+        region ??
+        fullMeasures(
+          score,
+          hit.measure.measureIndex,
+          hit.measure.measureIndex,
+          score.staves.findIndex((s) => s.id === hit.staffId),
+          score.staves.findIndex((s) => s.id === hit.staffId),
+        );
+      const a = score.measures.findIndex((m) => m.id === r.start.measureId),
+        b = score.measures.findIndex((m) => m.id === r.end.measureId);
+      const complete =
+        r.start.offset.n === 0 &&
+        compare(r.end.offset, measureBeats(score.measures[b])) === 0;
+      chooseRegion(
+        fullMeasures(
+          score,
+          a,
+          b,
+          complete ? 0 : score.staves.findIndex((s) => s.id === r.staffIds[0]),
+          complete
+            ? score.staves.length - 1
+            : score.staves.findIndex((s) => s.id === r.staffIds.at(-1)),
+        ),
+      );
     }
   };
 
@@ -535,7 +1596,13 @@ export function App() {
   useLayoutEffect(() => {
     if (!host.current || !fonts) return;
     try {
-      const next = renderScore(host.current, score, selected, concert);
+      const next = renderScore(
+        host.current,
+        score,
+        selected,
+        concert,
+        viewOptions,
+      );
       setLayout(next);
       if (lastHit.current) {
         const old = lastHit.current;
@@ -549,10 +1616,10 @@ export function App() {
     } catch (e) {
       report(`Engraving: ${e}`, true);
     }
-  }, [score, selected, concert, fonts]);
+  }, [score, selected, concert, fonts, viewOptions]);
   useLayoutEffect(() => {
     const element = scrollHost.current;
-    if (!element || !fitWidth) return;
+    if (!element || (!fitWidth && !fitPage)) return;
     const resize = () => {
       const style = getComputedStyle(element);
       const available =
@@ -560,13 +1627,79 @@ export function App() {
         parseFloat(style.paddingLeft) -
         parseFloat(style.paddingRight) -
         4;
-      setZoom(Math.max(0.35, Math.min(1.5, available / 1120)));
+      const page = layout?.pages?.[0];
+      const width =
+          viewOptions.view === "scroll" ? 1000 : (page?.width ?? 1000),
+        height = page?.height ?? 1414;
+      setZoom(
+        Math.max(
+          0.1,
+          Math.min(
+            4,
+            fitPage
+              ? Math.min(
+                  available / width,
+                  (element.clientHeight - 48) / height,
+                )
+              : available / width,
+          ),
+        ),
+      );
     };
     const observer = new ResizeObserver(resize);
     observer.observe(element);
     resize();
     return () => observer.disconnect();
-  }, [fitWidth]);
+  }, [fitWidth, fitPage, layout, showInspector, showInstruments]);
+  useEffect(() => {
+    const element = scrollHost.current;
+    if (!element || !layout || !element.clientWidth || auditioning) return;
+    const m =
+      playing && playhead !== undefined
+        ? layout.measures.find(
+            (m) => playhead >= m.start && playhead < m.start + m.length,
+          )
+        : ["write", "speedy"].includes(mode)
+          ? layout.measures.find((m) => m.measureId === cursor.measureId)
+          : undefined;
+    if (!m) return;
+    const st = m.staves.find((s) => s.id === cursor.staffId) ?? m.staves[0];
+    const x =
+        xAtTime(
+          m,
+          playing && playhead !== undefined
+            ? playhead - m.start
+            : value(cursor.offset),
+        ) *
+          zoom +
+        26,
+      y = st.lineBottom * zoom + 26;
+    if (
+      x < element.scrollLeft + 45 ||
+      x > element.scrollLeft + element.clientWidth - 45
+    )
+      element.scrollLeft = Math.max(0, x - element.clientWidth * 0.25);
+    if (
+      y < element.scrollTop + 55 ||
+      y > element.scrollTop + element.clientHeight - 60
+    )
+      element.scrollTop = Math.max(0, y - element.clientHeight * 0.4);
+  }, [cursor, layout, mode, playing, playhead, zoom, auditioning]);
+  useEffect(() => {
+    const element = scrollHost.current;
+    if (!element) return;
+    const wheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        zoomTo(zoom * Math.exp(-e.deltaY * 0.002), {
+          x: e.clientX,
+          y: e.clientY,
+        });
+      }
+    };
+    element.addEventListener("wheel", wheel, { passive: false });
+    return () => element.removeEventListener("wheel", wheel);
+  }, [zoom]);
   useEffect(() => {
     latchedRef.current = latched;
     if (latched) {
@@ -589,41 +1722,46 @@ export function App() {
     refreshAudition();
   }, [scope, pedal, retriggerAll]);
   useEffect(() => {
+    const handleCommand = command;
     const off = window.desktop?.onCommand((command) => {
       if (
-        ["copy", "cut", "paste", "undo", "redo"].includes(command) &&
+        ["copy", "cut", "paste", "undo", "redo", "selectAll"].includes(
+          command,
+        ) &&
         editable(document.activeElement)
       ) {
         void window.desktop?.editText(command);
         return;
       }
-      if (command === "undo") history(true);
-      else if (command === "redo") history(false);
-      else if (command === "copy" || command === "cut") {
-        if (note) {
-          clipboard.current = structuredClone(note);
-          report("Note or chord copied.");
-          if (command === "cut") remove();
-        }
-      } else if (command === "paste") {
-        if (clipboard.current)
-          insert(clipboard.current.pitches, cursor, clipboard.current.duration);
-      } else if (command === "help") {
-        stop();
-        setHelp(true);
-      } else void fileAction(command);
+      if (dialog || help) return;
+      handleCommand(command);
     });
     return off;
-  }, [score, cursor, dirty, selected]);
+  }, [
+    score,
+    cursor,
+    dirty,
+    selected,
+    region,
+    viewOptions,
+    zoom,
+    showInspector,
+    showInstruments,
+    dialog,
+    help,
+  ]);
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.code === "Escape") {
         e.preventDefault();
         stop();
         setHelp(false);
+        setDialog(undefined);
+        setContextMenu(undefined);
+        setMode("select");
         return;
       }
-      if (editable(e.target) || e.isComposing) return;
+      if (editable(e.target) || e.isComposing || dialog || help) return;
       if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
         shift.current = true;
         refreshAudition();
@@ -632,6 +1770,7 @@ export function App() {
       if (e.code === "Space") {
         e.preventDefault();
         if (e.repeat || held.current || help) return;
+        lastAudition.current = undefined;
         held.current = true;
         playRequest.current++;
         controlGesture.current = e.ctrlKey;
@@ -686,41 +1825,135 @@ export function App() {
         e.preventDefault();
         return;
       }
+      if (
+        e.shiftKey &&
+        region &&
+        [
+          "ArrowLeft",
+          "ArrowRight",
+          "ArrowUp",
+          "ArrowDown",
+          "Home",
+          "End",
+          "PageUp",
+          "PageDown",
+        ].includes(e.code)
+      ) {
+        e.preventDefault();
+        const axis = ["ArrowUp", "ArrowDown"].includes(e.code)
+          ? "vertical"
+          : "horizontal";
+        selectionEdges.current[axis] ??= ["ArrowLeft", "ArrowUp"].includes(
+          e.code,
+        )
+          ? "start"
+          : "end";
+        chooseRegion(
+          moveRegionEdge(
+            score,
+            region,
+            e.code,
+            e.ctrlKey || e.metaKey,
+            selectionEdges.current[axis],
+          ),
+        );
+        return;
+      }
+      const digit = /^(?:Digit|Numpad)([0-9])$/.exec(e.code)?.[1];
+      const durationKeys: Record<string, number> = {
+        "1": 64,
+        "2": 32,
+        "3": 16,
+        "4": 8,
+        "5": 4,
+        "6": 2,
+        "7": 1,
+      };
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        ["3", "5", "7"].includes(digit ?? "") &&
+        !e.shiftKey &&
+        (mode === "write" || mode === "speedy")
+      ) {
+        e.preventDefault();
+        setEntryDuration((d) => ({
+          ...d,
+          tuplets: d.tuplets.length
+            ? []
+            : [{ actual: Number(digit), normal: digit === "3" ? 2 : 4 }],
+        }));
+        return;
+      }
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.shiftKey &&
+        digit &&
+        durationKeys[digit] &&
+        mode === "speedy"
+      ) {
+        e.preventDefault();
+        insert([], cursor, { ...entryDuration, base: durationKeys[digit] });
+        return;
+      }
       if (e.ctrlKey || e.metaKey) {
-        if (e.code === "KeyZ") {
+        const actions: Record<string, string> = {
+          KeyZ: e.shiftKey ? "redo" : "undo",
+          KeyY: "redo",
+          KeyS: e.shiftKey ? "saveAs" : "save",
+          KeyO: "open",
+          KeyN: "new",
+          KeyP: "print",
+          KeyE: "toggleView",
+          KeyC: "copy",
+          KeyX: "cut",
+          KeyV: e.altKey ? "repeat" : "paste",
+          KeyI: "pasteInsert",
+          KeyA: "selectAll",
+          KeyG: "goTo",
+          KeyM: "fitMeasures",
+          Equal: "zoomIn",
+          NumpadAdd: "zoomIn",
+          Minus: "zoomOut",
+          NumpadSubtract: "zoomOut",
+          BracketRight: "fitWidth",
+          BracketLeft: "fitPage",
+          Digit1: "zoom100",
+        };
+        if (actions[e.code]) {
           e.preventDefault();
-          history(!e.shiftKey);
+          command(actions[e.code]);
         }
-        if (e.code === "KeyY") {
+        if (e.code === "Enter") {
           e.preventDefault();
-          history(false);
+          void play(e.shiftKey);
         }
-        if (e.code === "KeyS") {
+        if (e.code === "Home" || e.code === "End") {
           e.preventDefault();
-          void fileAction(e.shiftKey ? "saveAs" : "save");
-        }
-        if (e.code === "KeyO") {
-          e.preventDefault();
-          void fileAction("open");
-        }
-        if (e.code === "KeyE") {
-          e.preventDefault();
-          void fileAction("midi");
-        }
-        if (e.code === "KeyC" && note) {
-          e.preventDefault();
-          clipboard.current = structuredClone(note);
-          report("Note or chord copied.");
-        }
-        if (e.code === "KeyV" && clipboard.current) {
-          e.preventDefault();
-          insert(clipboard.current.pitches, cursor, clipboard.current.duration);
+          revealMeasure(e.code === "Home" ? 0 : score.measures.length - 1);
         }
         return;
       }
       if (e.code === "Enter") {
         e.preventDefault();
-        void play();
+        if (mode === "write") insert([entryPitch]);
+        else if (mode === "speedy") {
+          const n = score.notes.find(
+            (n) =>
+              n.staffId === cursor.staffId &&
+              n.measureId === cursor.measureId &&
+              n.voice === cursor.voice &&
+              compare(n.offset, cursor.offset) === 0,
+          );
+          if (n)
+            commit((s) => {
+              const x = s.notes.find((x) => x.id === n.id)!;
+              if (
+                !x.pitches.some((p) => midiPitch(p) === midiPitch(entryPitch))
+              )
+                x.pitches.push(entryPitch);
+            });
+          else insert([entryPitch]);
+        } else void play();
         return;
       }
       if (e.code === "F1" || e.key === "?") {
@@ -731,7 +1964,9 @@ export function App() {
       }
       if (e.code === "Delete" || e.code === "Backspace") {
         e.preventDefault();
-        remove();
+        if (region && e.code === "Delete" && isStack(score, region))
+          command("deleteMeasures");
+        else remove();
         return;
       }
       if (e.code === "KeyN") {
@@ -741,7 +1976,11 @@ export function App() {
       }
       if (e.code === "KeyR") {
         e.preventDefault();
-        insert([]);
+        if (mode === "write" && note)
+          editNote((n) => {
+            n.pitches = n.pitches.length ? [] : [entryPitch];
+          });
+        else insert([]);
         return;
       }
       if (e.code === "KeyT") {
@@ -754,10 +1993,45 @@ export function App() {
       }
       if (e.code === "Period") {
         e.preventDefault();
-        setEntryDuration((d) => ({ ...d, dots: (d.dots + 1) % 3 }));
+        if (note && (mode === "speedy" || mode === "write")) {
+          const dotted = {
+            ...note.duration,
+            dots: (note.duration.dots + 1) % 3,
+          };
+          if (
+            commit((s) => {
+              const created = enterNote(
+                s,
+                {
+                  staffId: note.staffId,
+                  measureId: note.measureId,
+                  offset: note.offset,
+                  voice: note.voice,
+                },
+                dotted,
+                note.pitches,
+              );
+              setSelected(created[0].id);
+            })
+          ) {
+            setEntryDuration(dotted);
+            setCursor(
+              nextCursor(
+                score,
+                {
+                  staffId: note.staffId,
+                  measureId: note.measureId,
+                  offset: note.offset,
+                  voice: note.voice,
+                },
+                beats(dotted),
+              ),
+            );
+          }
+        } else setEntryDuration((d) => ({ ...d, dots: (d.dots + 1) % 3 }));
         return;
       }
-      if (e.code === "Digit3") {
+      if (digit === "9" && mode === "write") {
         e.preventDefault();
         setEntryDuration((d) => ({
           ...d,
@@ -765,23 +2039,138 @@ export function App() {
         }));
         return;
       }
-      const durations: Record<string, number> = {
-        Digit1: 64,
-        Digit2: 32,
-        Digit4: 16,
-        Digit5: 8,
-        Digit6: 4,
-        Digit7: 2,
-        Digit8: 1,
-      };
-      if (durations[e.code]) {
+      if (digit === "0") {
         e.preventDefault();
-        setEntryDuration((d) => ({ ...d, base: durations[e.code] }));
+        insert([]);
+        return;
+      }
+      if (
+        e.altKey &&
+        e.shiftKey &&
+        digit &&
+        Number(digit) >= 1 &&
+        Number(digit) <= 4
+      ) {
+        e.preventDefault();
+        setCursor({ ...cursor, voice: Number(digit) - 1 });
+        setSelected(undefined);
+        return;
+      }
+      if (digit && durationKeys[digit]) {
+        e.preventDefault();
+        const d = { ...entryDuration, base: durationKeys[digit] };
+        if (e.altKey && note) {
+          commit((s) => {
+            const created = enterNote(
+              s,
+              {
+                staffId: note.staffId,
+                measureId: note.measureId,
+                offset: note.offset,
+                voice: note.voice,
+              },
+              d,
+              note.pitches,
+            );
+            setSelected(created[0].id);
+          });
+        } else if (mode === "speedy") {
+          const n = score.notes.find(
+            (n) =>
+              n.staffId === cursor.staffId &&
+              n.measureId === cursor.measureId &&
+              n.voice === cursor.voice &&
+              compare(n.offset, cursor.offset) === 0,
+          );
+          insert(n?.pitches ?? [entryPitch], cursor, d);
+        } else setEntryDuration(d);
+        return;
+      }
+      if (e.code === "Quote" && e.shiftKey) {
+        e.preventDefault();
+        setCursor({ ...cursor, voice: (cursor.voice + 1) % 4 });
+        setSelected(undefined);
+        return;
+      }
+      if (e.code === "BracketLeft" || e.code === "BracketRight") {
+        e.preventDefault();
+        const mi = Math.max(
+          0,
+          Math.min(
+            score.measures.length - 1,
+            measureIndex + (e.code === "BracketRight" ? 1 : -1),
+          ),
+        );
+        setCursor({
+          ...cursor,
+          measureId: score.measures[mi].id,
+          offset: ZERO,
+        });
+        setSelected(undefined);
+        revealMeasure(mi);
+        return;
+      }
+      if (
+        (e.code === "Equal" ||
+          e.code === "Minus" ||
+          e.code === "NumpadAdd" ||
+          e.code === "NumpadSubtract") &&
+        note
+      ) {
+        e.preventDefault();
+        editNote((n) => {
+          n.pitches = n.pitches.map((p) => ({
+            ...p,
+            alter: Math.max(
+              -2,
+              Math.min(
+                2,
+                p.alter + (["Equal", "NumpadAdd"].includes(e.code) ? 1 : -1),
+              ),
+            ),
+          }));
+        });
         return;
       }
       if (e.code === "ArrowLeft" || e.code === "ArrowRight") {
         e.preventDefault();
         const dir = e.code === "ArrowRight" ? 1 : -1;
+        if (region && mode === "select") {
+          const mi = Math.max(
+              0,
+              Math.min(score.measures.length - 1, measureIndex + dir),
+            ),
+            si = score.staves.indexOf(staff);
+          chooseRegion(fullMeasures(score, mi, mi, si, si));
+          revealMeasure(mi);
+          return;
+        }
+        if (mode === "speedy") {
+          const entries = score.notes
+            .filter(
+              (n) => n.staffId === cursor.staffId && n.voice === cursor.voice,
+            )
+            .sort((a, b) =>
+              compare(absolute(index.starts, a), absolute(index.starts, b)),
+            );
+          const t = absolute(index.starts, cursor);
+          const next =
+            dir > 0
+              ? entries.find((n) => compare(absolute(index.starts, n), t) > 0)
+              : [...entries]
+                  .reverse()
+                  .find((n) => compare(absolute(index.starts, n), t) < 0);
+          if (next) {
+            setCursor({
+              ...cursor,
+              measureId: next.measureId,
+              offset: next.offset,
+            });
+            setSelected(next.id);
+            setEntryPitch(next.pitches[0] ?? entryPitch);
+            return;
+          }
+        }
         if (dir > 0) setCursor(nextCursor(score, cursor, beats(entryDuration)));
         else {
           let t = sub(absolute(index.starts, cursor), beats(entryDuration));
@@ -801,6 +2190,14 @@ export function App() {
       }
       if (e.code === "ArrowUp" || e.code === "ArrowDown") {
         e.preventDefault();
+        if (mode === "speedy" || (!note && mode === "write")) {
+          setEntryPitch((p) =>
+            e.shiftKey
+              ? { ...p, octave: p.octave + (e.code === "ArrowUp" ? 1 : -1) }
+              : moveDiatonic(p, e.code === "ArrowUp" ? 1 : -1),
+          );
+          return;
+        }
         if (note)
           editNote((n) => {
             n.pitches = n.pitches.map((p) =>
@@ -814,6 +2211,16 @@ export function App() {
       if (/^[a-g]$/i.test(e.key)) {
         e.preventDefault();
         const step = e.key.toUpperCase() as Step;
+        if (mode === "select") setMode("write");
+        if (mode === "speedy") {
+          setEntryPitch((p) => ({
+            ...p,
+            step,
+            alter: keyAlter(step, measure.key),
+          }));
+          return;
+        }
+        setRegion(undefined);
         if (e.shiftKey && note) {
           editNote((n) => {
             const previous = n.pitches.at(-1) ?? {
@@ -836,17 +2243,17 @@ export function App() {
           octave:
             lastHit.current?.staffId === cursor.staffId
               ? lastHit.current.pitch.octave
-              : staff.clef === "bass"
-                ? 3
-                : 5,
+              : entryPitch.octave,
           alter: keyAlter(step, measure.key),
         };
+        setEntryPitch(pitch);
         insert([pitch]);
       }
     };
     const up = (e: KeyboardEvent) => {
       if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
         shift.current = e.shiftKey;
+        if (!e.shiftKey) selectionEdges.current = {};
         refreshAudition();
       }
       if (
@@ -856,6 +2263,7 @@ export function App() {
           !e.ctrlKey)
       ) {
         held.current = false;
+        lastAudition.current = undefined;
         controlGesture.current = false;
         if (!latchedRef.current) {
           setAuditioning(false);
@@ -893,6 +2301,14 @@ export function App() {
     playing,
     help,
     retriggerAll,
+    region,
+    dialog,
+    mode,
+    viewOptions,
+    zoom,
+    entryPitch,
+    showInspector,
+    showInstruments,
   ]);
 
   const auditionVoices =
@@ -925,36 +2341,62 @@ export function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <div className="brand">
-          <span className="brand-mark">♮</span>
-          <div>
-            Unicaria<small>A place to hear your ideas</small>
-          </div>
-        </div>
-        <div className="document-name">
+        <MenuBar command={command} />
+        <button
+          className="document-name"
+          onClick={() => command("document")}
+          title="Edit title and composer"
+        >
           {score.title}
-          <span>{dirty ? "Unsaved changes" : "Local score"}</span>
-        </div>
-        <div className="file-actions">
-          <button onClick={() => void fileAction("open")}>Open</button>
-          <button onClick={() => void fileAction("save")}>Save</button>
-          <button className="outline" onClick={() => void fileAction("midi")}>
-            Export MIDI <span>↗</span>
-          </button>
-          <button
-            className="icon"
-            aria-label="Keyboard guide"
-            onClick={() => {
-              stop();
-              setHelp(true);
-            }}
-          >
-            ?
-          </button>
-        </div>
+          {dirty && (
+            <span className="unsaved-dot" aria-label="Unsaved changes">
+              •
+            </span>
+          )}
+        </button>
+        <div className="brand">Unicaria</div>
       </header>
       <div className="transport">
         <div className="transport-buttons">
+          <button
+            title="Open score (Ctrl+O)"
+            aria-label="Open score"
+            onClick={() => command("open")}
+          >
+            ▱
+          </button>
+          <button
+            title="Save (Ctrl+S)"
+            aria-label="Save score"
+            onClick={() => command("save")}
+          >
+            ▣
+          </button>
+          <span className="tool-divider" />
+          <button
+            className="icon"
+            disabled={!undo.current.length}
+            title="Undo (Ctrl+Z)"
+            onClick={() => history(true)}
+          >
+            ↶
+          </button>
+          <button
+            className="icon"
+            disabled={!redo.current.length}
+            title="Redo (Ctrl+Y)"
+            onClick={() => history(false)}
+          >
+            ↷
+          </button>
+          <span className="tool-divider" />
+          <button
+            className="icon"
+            title="Play from beginning"
+            onClick={() => void play(true)}
+          >
+            ↤
+          </button>
           <button
             className={"play " + (playing ? "active" : "")}
             aria-label={playing ? "Stop playback" : "Play score"}
@@ -964,20 +2406,13 @@ export function App() {
           </button>
           <button
             className="icon"
-            title="Play from beginning"
-            onClick={() => void play(true)}
-          >
-            ↤
-          </button>
-          <button
-            className="icon"
-            title="Panic: stop all sound (Escape)"
+            title="Stop all sound (Escape)"
             onClick={stop}
           >
-            ◼
+            ■
           </button>
           <div className="tempo">
-            <span>♩</span>
+            <span>♩ =</span>
             <input
               aria-label="Tempo"
               type="number"
@@ -990,26 +2425,28 @@ export function App() {
                 })
               }
             />
-            <small>BPM</small>
           </div>
         </div>
-        <div className={"audition-control " + (auditioning ? "listening" : "")}>
-          <button
-            aria-label="Audition"
-            className={latched ? "latched" : ""}
-            onClick={() => setLatched(!latched)}
-            aria-pressed={latched}
+        <div className="view-controls">
+          <select
+            aria-label="Score view"
+            value={viewOptions.view}
+            onChange={(e) => command(e.target.value)}
           >
-            ◉ <span>Audition</span>
+            <option value="page">Page view</option>
+            <option value="scroll">Scroll view</option>
+          </select>
+          <button title="Fit page (Ctrl+[)" onClick={() => command("fitPage")}>
+            Fit page
           </button>
-          <span className="hint">
-            <kbd>Space</kbd> + move · <kbd>Shift</kbd> for one staff
-          </span>
+          <button
+            title="Fit width (Ctrl+])"
+            onClick={() => command("fitWidth")}
+          >
+            Fit width
+          </button>
         </div>
         <div className="sound-controls">
-          <div className="meter" title="Audio output level">
-            <i style={{ height: `${Math.min(100, audio.rms * 700)}%` }} />
-          </div>
           <button
             className={"audio-state " + audio.state}
             onClick={() => void enable()}
@@ -1033,29 +2470,71 @@ export function App() {
               audio.volume(Number(e.target.value));
             }}
           />
+          <button
+            className={showInstruments ? "selected" : ""}
+            onClick={() => command("instruments")}
+          >
+            Instruments
+          </button>
+          <button
+            className={showInspector ? "selected" : ""}
+            onClick={() => command("inspector")}
+          >
+            Inspector
+          </button>
         </div>
       </div>
       <div className="workspace">
-        <InstrumentPanel
-          {...{
-            score,
-            staff,
-            instrument,
-            cursor,
-            commit,
-            setCursor,
-            setSelected,
-            newProgram,
-            setNewProgram,
-            addInstrument,
-          }}
-        />
+        <div className="tool-palette" aria-label="Notation tools">
+          {(
+            [
+              ["select", "↖", "Selection (Esc)"],
+              ["write", "♪", "Simple Entry (N)"],
+              ["speedy", "♬", "Speedy Entry"],
+              ["erase", "⌫", "Eraser"],
+              ["articulation", "•", "Articulation"],
+              ["expression", "mf", "Expression"],
+              ["crescendo", "<", "Crescendo"],
+              ["diminuendo", ">", "Diminuendo"],
+              ["slur", "⌢", "Slur"],
+              ["hand", "✋", "Hand"],
+              ["zoom", "⌕", "Zoom"],
+            ] as const
+          ).map(([tool, icon, title]) => (
+            <button
+              key={tool}
+              aria-label={title}
+              title={title}
+              aria-pressed={mode === tool}
+              className={mode === tool ? "selected" : ""}
+              onClick={() => command(tool)}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+        {showInstruments && (
+          <InstrumentPanel
+            {...{
+              score,
+              staff,
+              instrument,
+              cursor,
+              commit,
+              setCursor,
+              setSelected,
+              newProgram,
+              setNewProgram,
+              addInstrument,
+            }}
+          />
+        )}
         <main className="editor">
           <div className="notation-toolbar">
             <div className="segmented">
               <button
                 className={mode === "select" ? "selected" : ""}
-                title="Select notes"
+                title="Select measures and regions (Esc)"
                 onClick={() => setMode("select")}
               >
                 ↖ Select
@@ -1065,7 +2544,14 @@ export function App() {
                 title="Write notes (N)"
                 onClick={() => setMode("write")}
               >
-                ✎ Write
+                ♪ Simple
+              </button>
+              <button
+                className={mode === "speedy" ? "selected" : ""}
+                title="Pitch first, then duration"
+                onClick={() => command("speedy")}
+              >
+                ♬ Speedy
               </button>
             </div>
             <div className="duration-buttons">
@@ -1125,7 +2611,7 @@ export function App() {
               Rest
             </button>
             <select
-              aria-label="Voice"
+              aria-label="Layer"
               value={cursor.voice}
               onChange={(e) => {
                 setCursor({ ...cursor, voice: Number(e.target.value) });
@@ -1134,11 +2620,32 @@ export function App() {
             >
               {[0, 1, 2, 3].map((v) => (
                 <option key={v} value={v}>
-                  Voice {v + 1}
+                  Layer {v + 1}
                 </option>
               ))}
             </select>
             <div className="toolbar-end">
+              {mode === "articulation" && (
+                <select
+                  aria-label="Articulation tool"
+                  value={articulationValue}
+                  onChange={(e) =>
+                    setArticulationValue(e.target.value as Articulation)
+                  }
+                >
+                  {[
+                    "staccato",
+                    "tenuto",
+                    "accent",
+                    "marcato",
+                    "fermata",
+                    "trill",
+                    "tremolo",
+                  ].map((a) => (
+                    <option key={a}>{a}</option>
+                  ))}
+                </select>
+              )}
               <button
                 className="icon"
                 disabled={!undo.current.length}
@@ -1183,7 +2690,7 @@ export function App() {
             <div
               className="paper-space"
               style={{
-                width: 1120 * zoom,
+                width: (layout?.width ?? 1000) * zoom,
                 height: (layout?.height ?? 800) * zoom,
               }}
             >
@@ -1191,39 +2698,114 @@ export function App() {
                 className="paper"
                 style={{
                   transform: `scale(${zoom})`,
-                  width: 1120,
+                  width: layout?.width ?? 1000,
                   height: layout?.height ?? 800,
                 }}
-                onPointerMove={(e) => {
-                  const hit = pointer(e);
-                  lastHit.current = hit;
-                  setHover(hit);
-                  if (held.current || latchedRef.current) refreshAudition(hit);
-                }}
+                onPointerMove={pointerMove}
                 onPointerLeave={() => {
+                  if (gesture.current) return;
+                  lastAudition.current = undefined;
                   lastHit.current = undefined;
                   setHover(undefined);
                   if (held.current || latchedRef.current) audio.audition([]);
                 }}
-                onPointerDown={(e) => {
-                  (
-                    e.currentTarget.closest(".score-scroll") as HTMLElement
-                  ).focus();
+                onPointerDown={pointerDown}
+                onPointerUp={pointerUp}
+                onPointerCancel={() => {
+                  gesture.current = undefined;
+                  setDragRect(undefined);
+                  if (held.current) stop();
+                }}
+                onDoubleClick={doubleClick}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  if (suppressContext.current) {
+                    suppressContext.current = false;
+                    return;
+                  }
                   const hit = pointer(e);
-                  if (hit) selectHit(hit, e);
+                  if (hit && !region) {
+                    const si = score.staves.findIndex(
+                      (s) => s.id === hit.staffId,
+                    );
+                    chooseRegion(
+                      fullMeasures(
+                        score,
+                        hit.measure.measureIndex,
+                        hit.measure.measureIndex,
+                        si,
+                        si,
+                      ),
+                    );
+                  }
+                  setContextMenu({
+                    x: Math.min(e.clientX, window.innerWidth - 240),
+                    y: Math.min(e.clientY, window.innerHeight - 390),
+                  });
                 }}
               >
                 <div ref={host} className="engraving" />
-                {cursorBox && cursorStaff && !auditioning && !playing && (
-                  <div
-                    className="edit-caret"
-                    style={{
-                      left: xAtTime(cursorBox, value(cursor.offset)) - 5,
-                      top: cursorStaff.lineBottom - 49,
-                      height: 62,
-                    }}
-                  />
+                {region &&
+                  layout &&
+                  selectionRects(score, layout, region).map((r) => (
+                    <div
+                      key={r.key}
+                      className="region-highlight"
+                      style={{
+                        left: r.left,
+                        top: r.top,
+                        width: r.width,
+                        height: r.height,
+                      }}
+                    />
+                  ))}
+                {dragRect && (
+                  <div className="zoom-rectangle" style={dragRect} />
                 )}
+                {mode === "speedy" && cursorBox && cursorStaff && (
+                  <div
+                    className="speedy-frame"
+                    style={{
+                      left: cursorBox.x - 3,
+                      top: cursorStaff.lineBottom - 80,
+                      width: cursorBox.endX - cursorBox.x + 6,
+                      height: 112,
+                    }}
+                  >
+                    <span>
+                      Layer {cursor.voice + 1} · {pitchName(entryPitch)}
+                    </span>
+                    <i
+                      style={{
+                        left:
+                          xAtTime(cursorBox, value(cursor.offset)) -
+                          cursorBox.x +
+                          3,
+                        top:
+                          80 -
+                          (entryPitch.octave * 7 +
+                            steps.indexOf(entryPitch.step) -
+                            (staff.clef === "bass" ? 18 : 30)) *
+                            5,
+                      }}
+                    />
+                  </div>
+                )}
+                {cursorBox &&
+                  cursorStaff &&
+                  !auditioning &&
+                  !playing &&
+                  !region &&
+                  ["write", "speedy"].includes(mode) && (
+                    <div
+                      className="edit-caret"
+                      style={{
+                        left: xAtTime(cursorBox, value(cursor.offset)) - 5,
+                        top: cursorStaff.lineBottom - 49,
+                        height: 62,
+                      }}
+                    />
+                  )}
                 {activeBox && activePosition !== undefined && (
                   <div
                     className={"audition-cursor " + (playing ? "playback" : "")}
@@ -1235,459 +2817,482 @@ export function App() {
                       top: activeBox.top + 15,
                       height: activeBox.bottom - activeBox.top - 32,
                     }}
-                  >
-                    <span>{playing ? "PLAY" : "LISTEN"}</span>
-                  </div>
+                  ></div>
                 )}
               </div>
             </div>
             <div className="score-end">
-              <button
-                onClick={() =>
-                  commit((s) => {
-                    const last = s.measures.at(-1)!;
-                    s.measures.push({
-                      id: id(),
-                      beats: last.beats,
-                      beatType: last.beatType,
-                      key: last.key,
-                    });
-                  })
-                }
-              >
-                ＋ Add measure
+              <button onClick={() => command("addMeasures")}>
+                ＋ Add measures…
               </button>
-              <span>
-                Click a measure · type A–G · Shift + A–G adds a chord tone
-              </span>
             </div>
           </div>
           <div className="editor-bottom">
-            <span>
-              Measure {measureIndex + 1} · Beat{" "}
-              {(value(cursor.offset) + 1).toFixed(2).replace(/\.00$/, "")} ·{" "}
-              {staff.name}
-            </span>
-            <div>
-              <button
-                onClick={() => setConcert(!concert)}
-                className={concert ? "selected" : ""}
-              >
+            <div className="layer-buttons" aria-label="Layers">
+              {[0, 1, 2, 3].map((v) => (
+                <button
+                  key={v}
+                  aria-label={"Layer " + (v + 1)}
+                  className={cursor.voice === v ? "selected" : ""}
+                  onClick={() => {
+                    setCursor({ ...cursor, voice: v });
+                    setSelected(undefined);
+                  }}
+                >
+                  {v + 1}
+                </button>
+              ))}
+            </div>
+            <button className="position-status" onClick={() => command("goTo")}>
+              {region
+                ? regionDescription(score, region)
+                : "Measure " +
+                  (measureIndex + 1) +
+                  " · Beat " +
+                  Number((value(cursor.offset) + 1).toFixed(3)) +
+                  " · " +
+                  staff.name}
+            </button>
+            <div className="zoom-controls">
+              <button onClick={() => setConcert(!concert)}>
                 {concert ? "Concert pitch" : "Written pitch"}
               </button>
-              <button
-                onClick={() => setFitWidth(true)}
-                className={fitWidth ? "selected" : ""}
-              >
-                Fit
-              </button>
-              <button
-                onClick={() => {
-                  setFitWidth(false);
-                  setZoom((z) =>
-                    Math.max(0.35, Math.round((z - 0.1) * 100) / 100),
-                  );
-                }}
-              >
+              <button aria-label="Zoom out" onClick={() => zoomTo(zoom / 1.2)}>
                 −
               </button>
-              <span>{Math.round(zoom * 100)}%</span>
-              <button
-                onClick={() => {
-                  setFitWidth(false);
-                  setZoom((z) =>
-                    Math.min(1.5, Math.round((z + 0.1) * 100) / 100),
-                  );
-                }}
+              <select
+                aria-label="Zoom"
+                value={String(Math.round(zoom * 100))}
+                onChange={(e) => zoomTo(Number(e.target.value) / 100)}
               >
+                {[
+                  ...new Set([
+                    25,
+                    50,
+                    75,
+                    100,
+                    125,
+                    150,
+                    200,
+                    300,
+                    400,
+                    Math.round(zoom * 100),
+                  ]),
+                ]
+                  .sort((a, b) => a - b)
+                  .map((z) => (
+                    <option key={z} value={z}>
+                      {z}%
+                    </option>
+                  ))}
+              </select>
+              <button aria-label="Zoom in" onClick={() => zoomTo(zoom * 1.2)}>
                 ＋
               </button>
             </div>
           </div>
         </main>
-        <aside className="inspector">
-          <div className="inspector-tabs">
-            <button
-              className={panel === "note" ? "selected" : ""}
-              onClick={() => setPanel("note")}
-            >
-              Notation
-            </button>
-            <button
-              className={panel === "score" ? "selected" : ""}
-              onClick={() => setPanel("score")}
-            >
-              Score
-            </button>
-          </div>
-          {panel === "note" ? (
-            <>
-              <section>
-                <h3>{note ? "Selected note" : "Note entry"}</h3>
-                {note ? (
-                  <>
-                    <label>
-                      Pitches
-                      <input
-                        key={note.id + formatPitches(note.pitches)}
-                        defaultValue={formatPitches(note.pitches)}
-                        placeholder="C4 E4 G4"
-                        onBlur={(e) => {
-                          try {
-                            const pitches = parsePitches(e.target.value);
-                            if (
-                              JSON.stringify(pitches) !==
-                              JSON.stringify(note.pitches)
-                            )
-                              editNote((n) => {
-                                n.pitches = pitches;
-                              });
-                          } catch (err) {
-                            report(String(err), true);
-                          }
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") e.currentTarget.blur();
-                        }}
-                      />
-                    </label>
-                    <div className="row">
+        {showInspector && (
+          <aside className="inspector">
+            <div className="inspector-tabs">
+              <button
+                className={panel === "note" ? "selected" : ""}
+                onClick={() => setPanel("note")}
+              >
+                Notation
+              </button>
+              <button
+                className={panel === "score" ? "selected" : ""}
+                onClick={() => setPanel("score")}
+              >
+                Score
+              </button>
+            </div>
+            {panel === "note" ? (
+              <>
+                <section>
+                  <h3>{note ? "Selected note" : "Note entry"}</h3>
+                  {note ? (
+                    <>
                       <label>
-                        Duration
+                        Pitches
+                        <input
+                          key={note.id + formatPitches(note.pitches)}
+                          defaultValue={formatPitches(note.pitches)}
+                          placeholder="C4 E4 G4"
+                          onBlur={(e) => {
+                            try {
+                              const pitches = parsePitches(e.target.value);
+                              if (
+                                JSON.stringify(pitches) !==
+                                JSON.stringify(note.pitches)
+                              )
+                                editNote((n) => {
+                                  n.pitches = pitches;
+                                });
+                            } catch (err) {
+                              report(String(err), true);
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") e.currentTarget.blur();
+                          }}
+                        />
+                      </label>
+                      <div className="row">
+                        <label>
+                          Duration
+                          <select
+                            value={note.duration.base}
+                            onChange={(e) =>
+                              editNote((n) => {
+                                n.duration.base = Number(e.target.value);
+                              })
+                            }
+                          >
+                            {[1, 2, 4, 8, 16, 32, 64].map((v) => (
+                              <option key={v} value={v}>
+                                1/{v}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Dots
+                          <select
+                            value={note.duration.dots}
+                            onChange={(e) =>
+                              editNote((n) => {
+                                n.duration.dots = Number(e.target.value);
+                              })
+                            }
+                          >
+                            {[0, 1, 2].map((v) => (
+                              <option key={v}>{v}</option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                      <label>
+                        Articulation
                         <select
-                          value={note.duration.base}
+                          value={note.articulation}
                           onChange={(e) =>
                             editNote((n) => {
-                              n.duration.base = Number(e.target.value);
+                              n.articulation = e.target.value as Articulation;
                             })
                           }
                         >
-                          {[1, 2, 4, 8, 16, 32, 64].map((v) => (
-                            <option key={v} value={v}>
-                              1/{v}
+                          {[
+                            "",
+                            "staccato",
+                            "tenuto",
+                            "accent",
+                            "marcato",
+                            "fermata",
+                            "trill",
+                            "tremolo",
+                          ].map((a) => (
+                            <option key={a} value={a}>
+                              {a || "None"}
                             </option>
                           ))}
                         </select>
                       </label>
+                      <div className="row buttons">
+                        <button
+                          className={note.tieTo ? "selected" : ""}
+                          onClick={() =>
+                            commit((s) => connectNext(s, note.id, "tieTo"))
+                          }
+                        >
+                          Tie →
+                        </button>
+                        <button
+                          className={note.slurTo ? "selected" : ""}
+                          onClick={() =>
+                            commit((s) => connectNext(s, note.id, "slurTo"))
+                          }
+                        >
+                          Slur →
+                        </button>
+                      </div>
                       <label>
-                        Dots
-                        <select
-                          value={note.duration.dots}
-                          onChange={(e) =>
+                        Grace notes
+                        <input
+                          key={note.id + "grace"}
+                          defaultValue={formatPitches(note.grace ?? [])}
+                          placeholder="e.g. D5 E5"
+                          onBlur={(e) => {
+                            try {
+                              const pitches = parsePitches(e.target.value);
+                              if (
+                                JSON.stringify(pitches) !==
+                                JSON.stringify(note.grace ?? [])
+                              )
+                                editNote((n) => {
+                                  n.grace = pitches;
+                                });
+                            } catch (err) {
+                              report(String(err), true);
+                            }
+                          }}
+                        />
+                      </label>
+                      <div className="row buttons">
+                        <button
+                          onClick={() =>
                             editNote((n) => {
-                              n.duration.dots = Number(e.target.value);
+                              n.pitches = n.pitches.map((p) => ({
+                                ...p,
+                                alter: Math.max(-2, p.alter - 1),
+                              }));
                             })
                           }
                         >
-                          {[0, 1, 2].map((v) => (
-                            <option key={v}>{v}</option>
-                          ))}
-                        </select>
-                      </label>
+                          ♭ Lower
+                        </button>
+                        <button
+                          onClick={() =>
+                            editNote((n) => {
+                              n.pitches = n.pitches.map((p) => ({
+                                ...p,
+                                alter: Math.min(2, p.alter + 1),
+                              }));
+                            })
+                          }
+                        >
+                          ♯ Raise
+                        </button>
+                      </div>
+                      <button className="danger-link" onClick={remove}>
+                        Delete note
+                      </button>
+                    </>
+                  ) : (
+                    <p className="muted">
+                      Select a note to change its pitch, duration, articulation
+                      or ties. Use Write mode to place notes directly.
+                    </p>
+                  )}
+                </section>
+                <section>
+                  <h3>Expression</h3>
+                  <label>
+                    Marking
+                    <select
+                      value={markKind}
+                      onChange={(e) => {
+                        const kind = e.target.value as MarkKind;
+                        setMarkKind(kind);
+                        const defaults: Record<
+                          MarkKind,
+                          [string, number, number]
+                        > = {
+                          dynamic: ["mf", 80, 80],
+                          hairpin: ["cresc.", 60, 100],
+                          tempo: ["", score.tempo, score.tempo],
+                          tempoRamp: [
+                            "rit.",
+                            score.tempo,
+                            Math.round(score.tempo * 0.7),
+                          ],
+                          pedal: ["Ped.", 1, 0],
+                          text: ["dolce", 0, 0],
+                          program: ["pizz.", 45, 0],
+                          ottava: ["8va", 12, 0],
+                        };
+                        const [text, amount, target] = defaults[kind];
+                        setMarkText(text);
+                        setMarkAmount(amount);
+                        setMarkTarget(target);
+                      }}
+                    >
+                      <option value="dynamic">Dynamics</option>
+                      <option value="hairpin">Crescendo / diminuendo</option>
+                      <option value="tempo">Tempo</option>
+                      <option value="tempoRamp">
+                        Ritardando / accelerando
+                      </option>
+                      <option value="pedal">Sustain pedal</option>
+                      <option value="text">Expression text</option>
+                      <option value="program">Instrument change</option>
+                      <option value="ottava">Octave line</option>
+                    </select>
+                  </label>
+                  {markKind === "dynamic" ? (
+                    <div className="dynamic-grid">
+                      {Object.keys(dynamicValues).map((d) => (
+                        <button
+                          key={d}
+                          className={markText === d ? "selected" : ""}
+                          onClick={() => {
+                            setMarkText(d);
+                            setMarkAmount(dynamicValues[d]);
+                          }}
+                        >
+                          {d}
+                        </button>
+                      ))}
                     </div>
+                  ) : (
                     <label>
-                      Articulation
+                      Text
+                      <input
+                        value={markText}
+                        onChange={(e) => setMarkText(e.target.value)}
+                      />
+                    </label>
+                  )}
+                  {markKind === "program" ? (
+                    <label>
+                      Sound
                       <select
-                        value={note.articulation}
-                        onChange={(e) =>
-                          editNote((n) => {
-                            n.articulation = e.target.value as Articulation;
-                          })
-                        }
+                        value={markAmount}
+                        onChange={(e) => setMarkAmount(Number(e.target.value))}
                       >
-                        {[
-                          "",
-                          "staccato",
-                          "tenuto",
-                          "accent",
-                          "marcato",
-                          "fermata",
-                          "trill",
-                          "tremolo",
-                        ].map((a) => (
-                          <option key={a} value={a}>
-                            {a || "None"}
+                        {GM.map((n, i) => (
+                          <option key={i} value={i}>
+                            {n}
                           </option>
                         ))}
                       </select>
                     </label>
-                    <div className="row buttons">
-                      <button
-                        className={note.tieTo ? "selected" : ""}
-                        onClick={() =>
-                          commit((s) => connectNext(s, note.id, "tieTo"))
-                        }
-                      >
-                        Tie →
-                      </button>
-                      <button
-                        className={note.slurTo ? "selected" : ""}
-                        onClick={() =>
-                          commit((s) => connectNext(s, note.id, "slurTo"))
-                        }
-                      >
-                        Slur →
-                      </button>
-                    </div>
-                    <label>
-                      Grace notes
-                      <input
-                        key={note.id + "grace"}
-                        defaultValue={formatPitches(note.grace ?? [])}
-                        placeholder="e.g. D5 E5"
-                        onBlur={(e) => {
-                          try {
-                            const pitches = parsePitches(e.target.value);
-                            if (
-                              JSON.stringify(pitches) !==
-                              JSON.stringify(note.grace ?? [])
-                            )
-                              editNote((n) => {
-                                n.grace = pitches;
-                              });
-                          } catch (err) {
-                            report(String(err), true);
+                  ) : (
+                    !["dynamic", "pedal", "text"].includes(markKind) && (
+                      <label>
+                        {markKind === "ottava"
+                          ? "Semitones"
+                          : markKind.startsWith("tempo")
+                            ? "Starting BPM"
+                            : "Starting dynamic"}
+                        <input
+                          type="number"
+                          value={markAmount}
+                          onChange={(e) =>
+                            setMarkAmount(Number(e.target.value))
                           }
-                        }}
-                      />
-                    </label>
-                    <div className="row buttons">
-                      <button
-                        onClick={() =>
-                          editNote((n) => {
-                            n.pitches = n.pitches.map((p) => ({
-                              ...p,
-                              alter: Math.max(-2, p.alter - 1),
-                            }));
-                          })
-                        }
-                      >
-                        ♭ Lower
-                      </button>
-                      <button
-                        onClick={() =>
-                          editNote((n) => {
-                            n.pitches = n.pitches.map((p) => ({
-                              ...p,
-                              alter: Math.min(2, p.alter + 1),
-                            }));
-                          })
-                        }
-                      >
-                        ♯ Raise
-                      </button>
-                    </div>
-                    <button className="danger-link" onClick={remove}>
-                      Delete note
-                    </button>
-                  </>
-                ) : (
-                  <p className="muted">
-                    Select a note to change its pitch, duration, articulation or
-                    ties. Use Write mode to place notes directly.
-                  </p>
-                )}
-              </section>
-              <section>
-                <h3>Expression</h3>
-                <label>
-                  Marking
-                  <select
-                    value={markKind}
-                    onChange={(e) => {
-                      const kind = e.target.value as MarkKind;
-                      setMarkKind(kind);
-                      const defaults: Record<
-                        MarkKind,
-                        [string, number, number]
-                      > = {
-                        dynamic: ["mf", 80, 80],
-                        hairpin: ["cresc.", 60, 100],
-                        tempo: ["", score.tempo, score.tempo],
-                        tempoRamp: [
-                          "rit.",
-                          score.tempo,
-                          Math.round(score.tempo * 0.7),
-                        ],
-                        pedal: ["Ped.", 1, 0],
-                        text: ["dolce", 0, 0],
-                        program: ["pizz.", 45, 0],
-                        ottava: ["8va", 12, 0],
-                      };
-                      const [text, amount, target] = defaults[kind];
-                      setMarkText(text);
-                      setMarkAmount(amount);
-                      setMarkTarget(target);
-                    }}
-                  >
-                    <option value="dynamic">Dynamics</option>
-                    <option value="hairpin">Crescendo / diminuendo</option>
-                    <option value="tempo">Tempo</option>
-                    <option value="tempoRamp">Ritardando / accelerando</option>
-                    <option value="pedal">Sustain pedal</option>
-                    <option value="text">Expression text</option>
-                    <option value="program">Instrument change</option>
-                    <option value="ottava">Octave line</option>
-                  </select>
-                </label>
-                {markKind === "dynamic" ? (
-                  <div className="dynamic-grid">
-                    {Object.keys(dynamicValues).map((d) => (
-                      <button
-                        key={d}
-                        className={markText === d ? "selected" : ""}
-                        onClick={() => {
-                          setMarkText(d);
-                          setMarkAmount(dynamicValues[d]);
-                        }}
-                      >
-                        {d}
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <label>
-                    Text
-                    <input
-                      value={markText}
-                      onChange={(e) => setMarkText(e.target.value)}
-                    />
-                  </label>
-                )}
-                {markKind === "program" ? (
-                  <label>
-                    Sound
-                    <select
-                      value={markAmount}
-                      onChange={(e) => setMarkAmount(Number(e.target.value))}
-                    >
-                      {GM.map((n, i) => (
-                        <option key={i} value={i}>
-                          {n}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : (
-                  !["dynamic", "pedal", "text"].includes(markKind) && (
+                        />
+                      </label>
+                    )
+                  )}
+                  {["hairpin", "tempoRamp"].includes(markKind) && (
                     <label>
-                      {markKind === "ottava"
-                        ? "Semitones"
-                        : markKind.startsWith("tempo")
-                          ? "Starting BPM"
-                          : "Starting dynamic"}
+                      {markKind === "tempoRamp"
+                        ? "Target BPM"
+                        : "Target dynamic"}
                       <input
                         type="number"
-                        value={markAmount}
-                        onChange={(e) => setMarkAmount(Number(e.target.value))}
+                        value={markTarget}
+                        onChange={(e) => setMarkTarget(Number(e.target.value))}
                       />
                     </label>
-                  )
-                )}
-                {["hairpin", "tempoRamp"].includes(markKind) && (
-                  <label>
-                    {markKind === "tempoRamp" ? "Target BPM" : "Target dynamic"}
-                    <input
-                      type="number"
-                      value={markTarget}
-                      onChange={(e) => setMarkTarget(Number(e.target.value))}
-                    />
-                  </label>
-                )}
-                {["hairpin", "tempoRamp", "pedal", "ottava"].includes(
-                  markKind,
-                ) && (
-                  <label>
-                    Length in quarter-note beats
-                    <input
-                      type="number"
-                      min=".125"
-                      step=".25"
-                      value={markLength}
-                      onChange={(e) => setMarkLength(Number(e.target.value))}
-                    />
-                  </label>
-                )}
-                <button className="wide accent" onClick={addMark}>
-                  Add at {note ? "selected note" : "cursor"}
-                </button>
-                {currentMarks.length > 0 && (
-                  <div className="mark-list">
-                    {currentMarks.map((m) => (
-                      <div key={m.id}>
-                        <span>
-                          {m.text || m.kind}{" "}
-                          <small>beat {value(m.offset) + 1}</small>
-                        </span>
-                        <button
-                          title="Remove expression"
-                          onClick={() =>
-                            commit((s) => {
-                              s.marks = s.marks.filter((x) => x.id !== m.id);
-                            })
-                          }
-                        >
-                          ×
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-              <section>
-                <h3>Audition behavior</h3>
-                <label>
-                  Scope
-                  <select
-                    value={scope}
-                    onChange={(e) => setScope(e.target.value as Scope["mode"])}
+                  )}
+                  {["hairpin", "tempoRamp", "pedal", "ottava"].includes(
+                    markKind,
+                  ) && (
+                    <label>
+                      Length in quarter-note beats
+                      <input
+                        type="number"
+                        min=".125"
+                        step=".25"
+                        value={markLength}
+                        onChange={(e) => setMarkLength(Number(e.target.value))}
+                      />
+                    </label>
+                  )}
+                  <button className="wide accent" onClick={addMark}>
+                    Add at {note ? "selected note" : "cursor"}
+                  </button>
+                  {currentMarks.length > 0 && (
+                    <div className="mark-list">
+                      {currentMarks.map((m) => (
+                        <div key={m.id}>
+                          <span>
+                            {m.text || m.kind}{" "}
+                            <small>beat {value(m.offset) + 1}</small>
+                          </span>
+                          <button
+                            title="Remove expression"
+                            onClick={() =>
+                              commit((s) => {
+                                s.marks = s.marks.filter((x) => x.id !== m.id);
+                              })
+                            }
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+                <section>
+                  <h3>Sound preferences</h3>
+                  <button
+                    aria-label="Latch audition"
+                    aria-pressed={latched}
+                    onClick={() => setLatched(!latched)}
                   >
-                    <option value="all">All instruments</option>
-                    <option value="staff">Hovered staff</option>
-                    <option value="instrument">Hovered instrument</option>
-                  </select>
-                </label>
-                <label className="check">
-                  <input
-                    type="checkbox"
-                    checked={pedal}
-                    onChange={(e) => setPedal(e.target.checked)}
-                  />
-                  Include pedal-held notes
-                </label>
-                <label className="check">
-                  <input
-                    type="checkbox"
-                    checked={retriggerAll}
-                    onChange={(e) => setRetriggerAll(e.target.checked)}
-                  />
-                  Reattack each new chord
-                </label>
-                <p className="muted small">
-                  Held notes and ties stay connected. Press R while auditioning
-                  to hear a decayed chord again.
-                </p>
-              </section>
-            </>
-          ) : (
-            <>
-              <ScoreSettings
-                {...{
-                  score,
-                  staff,
-                  instrument,
-                  measure,
-                  measureIndex,
-                  cursor,
-                  commit,
-                  setCursor,
-                  setSelected,
-                  fileAction,
-                }}
-              />
-            </>
-          )}
-        </aside>
+                    {latched ? "Release held audition" : "Latch audition"}
+                  </button>
+                  <label>
+                    Scope
+                    <select
+                      value={scope}
+                      onChange={(e) =>
+                        setScope(e.target.value as Scope["mode"])
+                      }
+                    >
+                      <option value="all">All instruments</option>
+                      <option value="staff">Hovered staff</option>
+                      <option value="instrument">Hovered instrument</option>
+                    </select>
+                  </label>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={pedal}
+                      onChange={(e) => setPedal(e.target.checked)}
+                    />
+                    Include pedal-held notes
+                  </label>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={retriggerAll}
+                      onChange={(e) => setRetriggerAll(e.target.checked)}
+                    />
+                    Reattack each new chord
+                  </label>
+                  <p className="muted small">
+                    Held notes and ties stay connected. Press R while
+                    auditioning to hear a decayed chord again.
+                  </p>
+                </section>
+              </>
+            ) : (
+              <>
+                <ScoreSettings
+                  {...{
+                    score,
+                    staff,
+                    instrument,
+                    measure,
+                    measureIndex,
+                    cursor,
+                    commit,
+                    setCursor,
+                    setSelected,
+                    fileAction,
+                    command,
+                  }}
+                />
+              </>
+            )}
+          </aside>
+        )}
       </div>
       <footer className={"status " + (error ? "error" : "")}>
         <span className="status-dot" />
@@ -1703,6 +3308,51 @@ export function App() {
         </span>
       </footer>
       {help && <KeyboardGuide setHelp={setHelp} />}
+      {dialog && (
+        <CommandDialog
+          key={dialog.title}
+          spec={dialog}
+          close={() => {
+            setDialog(undefined);
+            scrollHost.current?.focus();
+          }}
+        />
+      )}
+      {contextMenu && (
+        <>
+          <div
+            className="context-dismiss"
+            onPointerDown={() => setContextMenu(undefined)}
+          />
+          <div
+            className="menu-popup context-menu"
+            role="menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            {[
+              ["cut", "Cut"],
+              ["copy", "Copy"],
+              ["paste", "Paste"],
+              ["pasteInsert", "Insert copied music"],
+              ["clear", "Clear music"],
+              ["insertMeasures", "Insert measures…"],
+              ["addMeasures", "Add measures…"],
+              ["deleteMeasures", "Delete measures"],
+              ["selectRegion", "Select region…"],
+              ["transpose", "Transpose…"],
+              ["measureSettings", "Time / key signature…"],
+            ].map(([action, label]) => (
+              <button
+                role="menuitem"
+                key={action}
+                onClick={() => command(action)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }

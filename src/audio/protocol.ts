@@ -9,6 +9,14 @@ export type EngineMessage =
       retrigger?: boolean;
     }
   | { type: "stop"; epoch: number }
+  | {
+      type: "sweep";
+      epoch: number;
+      sequence: number;
+      frames: DesiredVoice[][];
+      direction: number;
+      retrigger?: boolean;
+    }
   | { type: "heartbeat"; epoch: number }
   | {
       type: "play";
